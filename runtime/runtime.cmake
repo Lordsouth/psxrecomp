@@ -1813,8 +1813,12 @@ function(psxrecomp_add_game_runtime target)
     endif()
 
     set(_psxg_extras ${PSXG_CODEGEN_SETUP_SOURCES})
-    list(APPEND _psxg_extras
-        "${PSXRECOMP_ROOT}/host/psxrecomp_codegen_host.c")
+    if(PSX_RECOMP_UI)
+        # The codegen host backs recomp-ui's first-run / Generate & rebuild
+        # surfaces and includes launcher headers; UI-less builds have neither.
+        list(APPEND _psxg_extras
+            "${PSXRECOMP_ROOT}/host/psxrecomp_codegen_host.c")
+    endif()
 
     set(_psxg_rt_args
         GAME_VERSION "${PSX_GAME_VERSION}"
