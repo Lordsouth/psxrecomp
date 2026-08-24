@@ -10324,8 +10324,10 @@ int main(int argc, char** argv) {
 #endif
 
     /* Setup-host zip-root exe: after Generate & rebuild, hand off to the
-     * product binary under build-release/ (bios/, mods/, assets/, settings). */
-#if defined(PSX_HAS_GAME_CODEGEN)
+     * product binary under build-release/ (bios/, mods/, assets/, settings).
+     * The forward hook is declared (and meaningful) only for launcher builds;
+     * a PSX_RECOMP_UI=OFF game build has no setup-host to forward to. */
+#if defined(RECOMP_LAUNCHER) && defined(PSX_HAS_GAME_CODEGEN)
     psx_game_codegen_forward_if_built(argc, argv);
 #endif
 
