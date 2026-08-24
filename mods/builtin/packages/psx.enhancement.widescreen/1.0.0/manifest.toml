@@ -1,0 +1,45 @@
+format_version = 5
+id = "psx.enhancement.widescreen"
+version = "1.0.0"
+name = "Widescreen"
+author = "psxrecomp"
+description = "Widens the 3D projection so more of the world is visible, instead of stretching a 4:3 picture. Off by default."
+resolver = "declarative"
+save_compatibility = "shared"
+
+# The GTE X-squash tier is a property of the emulated GTE/GPU pair rather than
+# of any particular disc, so this ships with the framework for every title.
+[[target]]
+game_id = "*"
+
+[[feature]]
+id = "widescreen"
+name = "Widescreen"
+description = "Widens the field of view and letterboxes to the chosen aspect. Per-title polish (sprite tagging, edge culling, 2D backdrops) is separate: without it a game may show stretched billboards or pop-in at the newly revealed edges, so try it and turn it back off if your title looks wrong."
+group = "Video"
+default_enabled = false
+
+[[option]]
+feature = "widescreen"
+id = "aspect"
+label = "Aspect ratio"
+description = "16:9 suits most displays. 21:9 reveals the most world and is the least tested."
+group = "Video"
+type = "choice"
+default = "16:9"
+
+[[option.choice]]
+value = "16:9"
+label = "16:9"
+
+[[option.choice]]
+value = "16:10"
+label = "16:10"
+
+[[option.choice]]
+value = "21:9"
+label = "21:9 (ultrawide)"
+
+[[plugin]]
+feature = "widescreen"
+id = "psx.widescreen"

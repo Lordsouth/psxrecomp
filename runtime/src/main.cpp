@@ -1619,6 +1619,29 @@ extern "C" void psx_ws_set_native_wide(int on) {
 }
 extern "C" int psx_ws_get_native_wide(void) { return g_ws_native_wide; }
 
+/* Trusted-plugin widescreen entry point.
+ *
+ * Widescreen is mod-owned on PSX: the generic [video] aspect_ratio is
+ * clamped to 4:3 during launcher/settings resolution (ws_offered is pinned
+ * false) so no config or stale settings value can engage it. A trusted
+ * activation plugin calls this afterwards with the aspect its feature
+ * selected. Passing 4:3 returns the title to native. */
+extern "C" void psx_ws_engage_aspect(int num, int den) {
+    if (num <= 0 || den <= 0) return;
+    if (num == g_video_aspect_num && den == g_video_aspect_den) return;
+    g_video_aspect_num = num;
+    g_video_aspect_den = den;
+    gl_renderer_set_display_aspect(num, den);
+    if (sdl_renderer) {
+        g_logical_w = 480 * num * g_video_scale / den;
+        SDL_RenderSetLogicalSize(sdl_renderer, g_logical_w,
+                                 480 * g_video_scale);
+    }
+    refresh_widescreen_projection();
+    std::fprintf(stdout, "psxrecomp: widescreen engaged by plugin: %d:%d\n",
+                 num, den);
+}
+
 static bool          g_gl_active = false;    /* GL context live -> GL present path */
 static bool          g_vk_active = false;    /* Vulkan context live -> VK present path */
 /* Present straight from the FBO (fast, no readback). Set PSX_GL_FORCE_CPU_PRESENT=1
