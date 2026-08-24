@@ -168,6 +168,14 @@ static uint32_t    s_ring_count = 0;
  *   s_dump_armed - 1 if a wedge dump is allowed to fire; cleared after
  *                  firing, re-armed when the wedge clears (healthy tick). */
 static int      s_dump_armed = 1;
+/* Each dump is a full state snapshot -- ~109 MB for this title. The arm
+ * flag above re-arms on every healthy tick, so a game that merely STUTTERS
+ * (host under load, a long compile in the background) alternates
+ * wedge/healthy and writes one dump per stutter. That filled a 454 GB disk
+ * with 1213 files in a single session. A diagnostic must not be able to
+ * consume unbounded disk: cap per run, keeping the first (informative) few. */
+#define FREEZE_DUMP_MAX_PER_RUN 5
+static int      s_dump_count = 0;
 static uint32_t s_last_wedge_kind = 0;  /* informational, last detected kind */
 
 #ifdef _WIN32
@@ -804,8 +812,17 @@ static void heartbeat_write(void) {
     }
 
     if (wedge_kind != 0) {
-        if (s_dump_armed) {
+        if (s_dump_armed && s_dump_count >= FREEZE_DUMP_MAX_PER_RUN) {
             s_dump_armed = 0;
+            if (s_dump_count == FREEZE_DUMP_MAX_PER_RUN) {
+                s_dump_count++;   /* announce once, then stay quiet */
+                fprintf(stdout, "psxrecomp: freeze dump cap reached (%d this run); further wedges will not be dumped\n",
+                        FREEZE_DUMP_MAX_PER_RUN);
+                fflush(stdout);
+            }
+        } else if (s_dump_armed) {
+            s_dump_armed = 0;
+            s_dump_count++;
             s_last_wedge_kind = wedge_kind;
             freeze_dump_write(wall, frame, cyc, exc_reentry, cur_fn, last_store,
                               i_stat, i_mask, in_exc, total_checks,
