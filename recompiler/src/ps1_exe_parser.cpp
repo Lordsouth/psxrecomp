@@ -157,19 +157,39 @@ bool PS1Executable::validate(std::string& error_msg) const {
         return false;
     }
 
-    // Check BSS section doesn't overlap code
+    // Check BSS section doesn't clobber the executable
     if (header.memfill_size > 0) {
         uint32_t bss_start = header.memfill_start;
         uint32_t bss_end = header.bss_end();
         uint32_t code_end = end_address();
 
-        // BSS should come after code
+        // Retail headers may sector-round t_size so the declared memfill
+        // begins inside the padded tail of the code image (e.g. Digimon World
+        // SLUS-01032: t_size rounds to 0x80135000, memfill_start 0x80134C4C).
+        // Hardware memfills AFTER the text copy, zeroing that tail, so the
+        // overlap is benign as long as the entry point survives the fill.
         if (bss_start < code_end) {
-            error_msg = fmt::format(
-                "BSS section [0x{:08X}, 0x{:08X}) overlaps code [0x{:08X}, 0x{:08X})",
-                bss_start, bss_end, load_address(), code_end
+            if (bss_start <= load_address()) {
+                error_msg = fmt::format(
+                    "BSS section [0x{:08X}, 0x{:08X}) covers code load base 0x{:08X}",
+                    bss_start, bss_end, load_address()
+                );
+                return false;
+            }
+            if (header.initial_pc >= bss_start && header.initial_pc < bss_end) {
+                error_msg = fmt::format(
+                    "Entry PC 0x{:08X} lies inside BSS memfill [0x{:08X}, 0x{:08X}), "
+                    "which hardware zeroes before execution",
+                    header.initial_pc, bss_start, bss_end
+                );
+                return false;
+            }
+            fmt::print(
+                "WARNING: BSS memfill [0x{:08X}, 0x{:08X}) overlaps code tail "
+                "[0x{:08X}, 0x{:08X}); hardware zero-fills after load. "
+                "Consider a game.text_size bound at or below 0x{:08X}.\n",
+                bss_start, bss_end, bss_start, code_end, bss_start
             );
-            return false;
         }
     }
 
