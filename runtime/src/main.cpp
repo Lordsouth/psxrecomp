@@ -6455,6 +6455,40 @@ static NetplayVblankEpilogue sdl_vblank_present_body(void) {
      * Netplay paces in the epilogue AFTER present so Swap overlaps the
      * peer's guest quantum. Self-check replay runs uncapped like netplay
      * resim. */
+    /* Safety net: cadence is handed to driver vsync on a ~60 Hz panel and
+     * the pacer above is skipped. If the driver then does NOT actually
+     * block -- vsync forced off in a GPU control panel, a compositor that
+     * ignores it -- nothing throttles the sim and the game runs many times
+     * too fast. Measured here at 1.99x on a 120 Hz panel pretending to be
+     * 60 Hz. The pre-existing self-heal only catches vsync blocking too
+     * LONG, never this.
+     *
+     * Watch the real interval between frames; if it stays well under the
+     * PSX frame period, take cadence back. */
+    if (present_vsync_owns_cadence() && g_frame_period_ms > 0.0 &&
+        !manual_turbo_active && !turbo_load_paced) {
+        static uint64_t s_vs_last;
+        static int      s_vs_fast;
+        const uint64_t now_t = SDL_GetPerformanceCounter();
+        const uint64_t freq_t = SDL_GetPerformanceFrequency();
+        if (s_vs_last && freq_t) {
+            const double dt_ms =
+                (double)(now_t - s_vs_last) * 1000.0 / (double)freq_t;
+            if (dt_ms < g_frame_period_ms * 0.85) {
+                if (++s_vs_fast >= 120) {
+                    g_present_vsync_disabled = 1;
+                    apply_present_cadence();
+                    std::printf("psxrecomp: vsync is not limiting presents "
+                                "(%.2f ms vs %.2f ms target); taking over with "
+                                "the wall-clock pacer\n", dt_ms, g_frame_period_ms);
+                    std::fflush(stdout);
+                }
+            } else if (s_vs_fast) {
+                s_vs_fast = 0;
+            }
+        }
+        s_vs_last = now_t;
+    }
     if (!psx_netplay_active() && !psx_selfcheck_resim_active()) {
         uint64_t perf_start = runtime_perf_section_begin();
         if (!manual_turbo_active && !turbo_load_paced && present_should_wall_pace())
@@ -6977,40 +7011,6 @@ static void sdl_vblank_present(void) {
         return;
     }
     uint64_t perf_start = runtime_perf_section_begin();
-    /* Safety net: vsync owns the cadence only if it actually BLOCKS.
-     * When the driver ignores it (forced off in a GPU control panel, a
-     * compositor that does not honour it, some borderless setups), nothing
-     * throttles the sim: the game runs many times too fast, and merely
-     * unfocusing the window makes it look normal again because the desktop
-     * compositor then throttles presents. The existing self-heal only
-     * catches vsync blocking too LONG, never this.
-     *
-     * Measure the real interval between paced frames; if it stays well
-     * under the PSX frame period, hand cadence back to the wall pacer. */
-    if (present_vsync_owns_cadence() && g_frame_period_ms > 0.0) {
-        static uint64_t s_last_present_ticks;
-        static int      s_fast_frames;
-        const uint64_t now_ticks = SDL_GetPerformanceCounter();
-        const uint64_t freq      = SDL_GetPerformanceFrequency();
-        if (s_last_present_ticks && freq) {
-            const double dt_ms =
-                (double)(now_ticks - s_last_present_ticks) * 1000.0 / (double)freq;
-            /* 85% of the target: tolerates jitter and a slightly fast panel,
-             * but not a sim running free. */
-            if (dt_ms < g_frame_period_ms * 0.85) {
-                if (++s_fast_frames >= 120) {
-                    g_present_vsync_disabled = 1;
-                    std::printf("psxrecomp: vsync is not limiting presents "
-                                "(%.2f ms vs %.2f ms target); switching to the "
-                                "wall-clock pacer\n", dt_ms, g_frame_period_ms);
-                    std::fflush(stdout);
-                }
-            } else if (s_fast_frames) {
-                s_fast_frames = 0;
-            }
-        }
-        s_last_present_ticks = now_ticks;
-    }
     if (present_should_wall_pace())
         frame_pacer_wait(&s_frame_pacer, g_frame_period_ms);
     runtime_perf_section_end(perf_start, &g_runtime_perf.pacer_ticks);
