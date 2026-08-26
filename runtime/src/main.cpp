@@ -11477,6 +11477,28 @@ int main(int argc, char** argv) {
 #ifdef SDL_HINT_WINDOWS_DPI_SCALING
     SDL_SetHint(SDL_HINT_WINDOWS_DPI_SCALING, "0");
 #endif
+        /* Joystick backend hints MUST be set before the FIRST SDL_Init that
+         * brings up GAMECONTROLLER -- and on the launcher path that is right
+         * here, not the game-window block further down. That block sets the
+         * same hints, but it is guarded by !SDL_WasInit(): once the launcher
+         * has initialised the subsystem (and preserved it across the handoff)
+         * the guard is false, the second SDL_Init never runs, and the hints
+         * are dead letters.
+         *
+         * The symptom is device-specific and reads as a broken controller: a
+         * DualSense Edge enumerated through RAWINPUT instead of SDL's native
+         * PS5 HIDAPI driver reports the WRONG button map -- Options arrives as
+         * SDL_CONTROLLER_BUTTON_BACK and Create as _START, swapping Start and
+         * Select against every default mapping and against what the launcher's
+         * own Controls page captures. Pressing Start then does nothing.
+         *
+         * Keep this list identical to the game-window block below. */
+        SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "1");
+        SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
+        SDL_SetHintWithPriority(SDL_HINT_JOYSTICK_HIDAPI_PS5_RUMBLE, "1",
+                                SDL_HINT_OVERRIDE);
+        SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI_XBOX, "1");
         if (SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMECONTROLLER) == 0) {
             launcher_boot_timing_mark("host:after_sdl_init");
             recomp_launcher_set_preserve_sdl(1);

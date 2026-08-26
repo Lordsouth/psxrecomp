@@ -176,6 +176,26 @@ static int      s_dump_armed = 1;
  * consume unbounded disk: cap per run, keeping the first (informative) few. */
 #define FREEZE_DUMP_MAX_PER_RUN 5
 static int      s_dump_count = 0;
+
+/* Dump budget for this run. A 24-minute soak on Digimon World produced
+ * five kind-5 ("spin_freeze") dumps in the first two minutes -- while
+ * frames advanced at a steady 60 fps and the game stayed fully
+ * responsive. The heuristic fires on a title idling in its attract loop,
+ * so a normal play session can shed half a gigabyte of diagnostics for
+ * nothing. PSX_FREEZE_DUMP_MAX overrides the budget; 0 disables dumps
+ * entirely, which is what a shipped launcher wants. */
+static int freeze_dump_budget(void) {
+    static int cached = -1;
+    if (cached >= 0) return cached;
+    cached = FREEZE_DUMP_MAX_PER_RUN;
+    const char *e = getenv("PSX_FREEZE_DUMP_MAX");
+    if (e && *e) {
+        char *end = NULL;
+        long v = strtol(e, &end, 10);
+        if (end && end != e && v >= 0 && v <= 1000) cached = (int)v;
+    }
+    return cached;
+}
 static uint32_t s_last_wedge_kind = 0;  /* informational, last detected kind */
 
 #ifdef _WIN32
@@ -812,12 +832,12 @@ static void heartbeat_write(void) {
     }
 
     if (wedge_kind != 0) {
-        if (s_dump_armed && s_dump_count >= FREEZE_DUMP_MAX_PER_RUN) {
+        if (s_dump_armed && s_dump_count >= freeze_dump_budget()) {
             s_dump_armed = 0;
-            if (s_dump_count == FREEZE_DUMP_MAX_PER_RUN) {
+            if (s_dump_count == freeze_dump_budget()) {
                 s_dump_count++;   /* announce once, then stay quiet */
                 fprintf(stdout, "psxrecomp: freeze dump cap reached (%d this run); further wedges will not be dumped\n",
-                        FREEZE_DUMP_MAX_PER_RUN);
+                        freeze_dump_budget());
                 fflush(stdout);
             }
         } else if (s_dump_armed) {
