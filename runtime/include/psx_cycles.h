@@ -126,7 +126,19 @@ static inline void psx_advance_cycles(uint32_t cycles) {
 /* Publish deferred charges (IRQ edge / MMIO / savestate). Overlay DLLs keep
  * their pending total in the callback shim rather than these host globals. */
 #if defined(PSX_OVERLAY_DLL_BUILD)
-void overlay_flush_cycles(void);
+/* Overlay DLLs export this symbol; the loader resolves it by name.
+ * The attribute MUST be on the FIRST declaration: clang rejects a later
+ * definition that adds dllexport ("cannot add 'dllexport' attribute"),
+ * which broke every overlay build done with the bundled clang toolchain
+ * while GCC accepted it silently. */
+#ifndef PSX_OVERLAY_EXPORT
+#  if defined(_WIN32)
+#    define PSX_OVERLAY_EXPORT __declspec(dllexport)
+#  else
+#    define PSX_OVERLAY_EXPORT __attribute__((visibility("default")))
+#  endif
+#endif
+PSX_OVERLAY_EXPORT void overlay_flush_cycles(void);
 static inline void psx_cyc_local_publish(void) { }
 static inline void psx_cyc_batch_flush(void) { overlay_flush_cycles(); }
 #else

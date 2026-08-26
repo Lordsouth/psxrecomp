@@ -4,12 +4,17 @@
 static OverlayCallbacks g_cbs;
 static uint32_t s_pending_cycles;
 
-#ifdef _WIN32
-__declspec(dllexport)
-#else
-__attribute__((visibility("default")))
+/* Same macro the headers used on the declaration. They must match: clang
+ * refuses a definition that ADDS dllexport to an already-declared symbol,
+ * and the headers above have already declared this one. */
+#ifndef PSX_OVERLAY_EXPORT
+#  if defined(_WIN32)
+#    define PSX_OVERLAY_EXPORT __declspec(dllexport)
+#  else
+#    define PSX_OVERLAY_EXPORT __attribute__((visibility("default")))
+#  endif
 #endif
-void overlay_flush_cycles(void) {
+PSX_OVERLAY_EXPORT void overlay_flush_cycles(void) {
     uint32_t cycles = s_pending_cycles;
     s_pending_cycles = 0;
     if (cycles && g_cbs.advance_cycles) g_cbs.advance_cycles(cycles);

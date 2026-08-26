@@ -74,7 +74,19 @@ typedef struct CPUState {
  * Static recompiled code and the interpreter share host cycle state directly,
  * so their barrier compiles to nothing. */
 #ifdef PSX_OVERLAY_DLL_BUILD
-void overlay_flush_cycles(void);
+/* Overlay DLLs export this symbol; the loader resolves it by name.
+ * The attribute MUST be on the FIRST declaration: clang rejects a later
+ * definition that adds dllexport ("cannot add 'dllexport' attribute"),
+ * which broke every overlay build done with the bundled clang toolchain
+ * while GCC accepted it silently. */
+#ifndef PSX_OVERLAY_EXPORT
+#  if defined(_WIN32)
+#    define PSX_OVERLAY_EXPORT __declspec(dllexport)
+#  else
+#    define PSX_OVERLAY_EXPORT __attribute__((visibility("default")))
+#  endif
+#endif
+PSX_OVERLAY_EXPORT void overlay_flush_cycles(void);
 static inline void psx_store_cycle_barrier(void) { overlay_flush_cycles(); }
 #else
 static inline void psx_store_cycle_barrier(void) { }

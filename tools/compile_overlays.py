@@ -2059,6 +2059,15 @@ def patch_generated_c(src: str, load_addr: int, size: int) -> str:
     src = re.sub(r'^void func_([0-9A-Fa-f]{8})\(CPUState\* cpu\)$',
                  add_export, src, flags=re.MULTILINE)
 
+    #    ...and on the forward DECLARATIONS as well. Clang refuses a
+    #    definition that adds dllexport to a symbol already declared
+    #    without it ("cannot add 'dllexport' attribute"), and the emitter
+    #    writes a prototype for every function. GCC only warned, so this
+    #    passed on MSYS2 and failed on the bundled clang toolchain --
+    #    every overlay in a player's build fell back to the interpreter.
+    src = re.sub(r'^void func_([0-9A-Fa-f]{8})\(CPUState\* cpu\);$',
+                 add_export, src, flags=re.MULTILINE)
+
     return src
 
 
