@@ -6977,6 +6977,40 @@ static void sdl_vblank_present(void) {
         return;
     }
     uint64_t perf_start = runtime_perf_section_begin();
+    /* Safety net: vsync owns the cadence only if it actually BLOCKS.
+     * When the driver ignores it (forced off in a GPU control panel, a
+     * compositor that does not honour it, some borderless setups), nothing
+     * throttles the sim: the game runs many times too fast, and merely
+     * unfocusing the window makes it look normal again because the desktop
+     * compositor then throttles presents. The existing self-heal only
+     * catches vsync blocking too LONG, never this.
+     *
+     * Measure the real interval between paced frames; if it stays well
+     * under the PSX frame period, hand cadence back to the wall pacer. */
+    if (present_vsync_owns_cadence() && g_frame_period_ms > 0.0) {
+        static uint64_t s_last_present_ticks;
+        static int      s_fast_frames;
+        const uint64_t now_ticks = SDL_GetPerformanceCounter();
+        const uint64_t freq      = SDL_GetPerformanceFrequency();
+        if (s_last_present_ticks && freq) {
+            const double dt_ms =
+                (double)(now_ticks - s_last_present_ticks) * 1000.0 / (double)freq;
+            /* 85% of the target: tolerates jitter and a slightly fast panel,
+             * but not a sim running free. */
+            if (dt_ms < g_frame_period_ms * 0.85) {
+                if (++s_fast_frames >= 120) {
+                    g_present_vsync_disabled = 1;
+                    std::printf("psxrecomp: vsync is not limiting presents "
+                                "(%.2f ms vs %.2f ms target); switching to the "
+                                "wall-clock pacer\n", dt_ms, g_frame_period_ms);
+                    std::fflush(stdout);
+                }
+            } else if (s_fast_frames) {
+                s_fast_frames = 0;
+            }
+        }
+        s_last_present_ticks = now_ticks;
+    }
     if (present_should_wall_pace())
         frame_pacer_wait(&s_frame_pacer, g_frame_period_ms);
     runtime_perf_section_end(perf_start, &g_runtime_perf.pacer_ticks);
@@ -12840,6 +12874,20 @@ session_reboot:
         int disp_idx = SDL_GetWindowDisplayIndex(sdl_window);
         if (disp_idx >= 0 && SDL_GetCurrentDisplayMode(disp_idx, &dm) == 0 && dm.refresh_rate > 0) {
             double host_hz = (double)dm.refresh_rate;
+            /* PSX_FORCE_HOST_HZ: pretend the panel reports this refresh rate.
+             * The ~60 Hz branch below hands cadence to driver vsync and skips
+             * the wall-clock pacer, which is where "the game runs too fast"
+             * reports come from -- and it is unreachable for testing on any
+             * machine whose monitor is not 60 Hz. This makes that path
+             * exercisable without owning the hardware. */
+            if (const char *forced_hz = std::getenv("PSX_FORCE_HOST_HZ")) {
+                const double forced = std::atof(forced_hz);
+                if (forced > 0.0) {
+                    std::printf("psxrecomp: PSX_FORCE_HOST_HZ=%.2f (real panel "
+                                "reports %.2f)\n", forced, host_hz);
+                    host_hz = forced;
+                }
+            }
             g_host_refresh_hz = host_hz;
             if (host_hz >= 58.8 && host_hz <= 61.2) {
                 g_frame_period_ms = 1000.0 / host_hz;
