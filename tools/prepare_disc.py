@@ -626,13 +626,15 @@ def main() -> int:
         bin_path.write_bytes(bin_data)
 
     cue_path = cfg.out_dir / cfg.cue_name
-    cue_path.write_text(
-        f'FILE "{cfg.bin_name}" BINARY\n'
-        f"  TRACK 01 MODE2/2352\n"
-        f"    INDEX 01 00:00:00\n",
-        encoding="ascii",
-        newline="\n",
-    )
+    # NOT Path.write_text(newline=...): that keyword is Python 3.10+ and
+    # raises TypeError on 3.8/3.9 -- here at the very end of generate,
+    # after the disc has already been normalised.
+    with open(cue_path, "w", encoding="ascii", newline="\n") as _cue:
+        _cue.write(
+            'FILE "%s" BINARY\n'
+            "  TRACK 01 MODE2/2352\n"
+            "    INDEX 01 00:00:00\n" % cfg.bin_name
+        )
     print(f"wrote {cue_path}")
 
     out_md5, out_sha1, out_size = file_hashes(bin_path)
