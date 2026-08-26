@@ -144,6 +144,11 @@ def prune_after_rebuild(
             progress.log(f"Pruned build tree to binary+assets under {build_dir}")
 
 
+# os.utime(..., follow_symlinks=False) is POSIX-only; on Windows the
+# capability set omits it and the call raises NotImplementedError.
+_UTIME_CAN_NOFOLLOW = os.utime in os.supports_follow_symlinks
+
+
 def clamp_future_mtimes(
     root: Path,
     *,
@@ -200,9 +205,21 @@ def clamp_future_mtimes(
                 continue
             if mtime > stamp:
                 try:
-                    os.utime(p, (stamp, stamp), follow_symlinks=False)
+                    if _UTIME_CAN_NOFOLLOW:
+                        os.utime(p, (stamp, stamp), follow_symlinks=False)
+                    else:
+                        # Windows: os.utime cannot skip symlink resolution
+                        # at all, and follow_symlinks=False raises
+                        # NotImplementedError rather than OSError -- so it
+                        # also escaped the handler below and killed every
+                        # rebuild. Clamping is only build-ordering hygiene,
+                        # so skipping links is fine, and it avoids stamping
+                        # whatever a link points at outside the project.
+                        if p.is_symlink():
+                            continue
+                        os.utime(p, (stamp, stamp))
                     n += 1
-                except OSError:
+                except (OSError, NotImplementedError):
                     pass
     return n
 
