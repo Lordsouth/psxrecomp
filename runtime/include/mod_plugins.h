@@ -59,6 +59,14 @@ uint32_t psx_mod_alloc_gpu_dma_memory(uint32_t size, uint32_t alignment);
 int32_t psx_mod_widescreen_x_margin(void);
 
 /*
+ * Nonzero exactly when the GTE is scaling projected X this frame (squash-mode
+ * widescreen on a gameplay frame); fills the live xnum/xden ratio. Lets a
+ * game plugin apply the identical transform to CPU-built 2D so pre-rendered
+ * layers stay registered with squashed 3D.
+ */
+int psx_mod_ws_squash_params(int32_t* num, int32_t* den);
+
+/*
  * Read the committed value of one of this package's declared options, as the
  * player left it in the launcher (or the manifest default when untouched).
  * Writes a NUL-terminated string into `out` and returns 1; returns 0 with

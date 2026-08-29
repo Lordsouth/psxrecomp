@@ -2162,3 +2162,16 @@ extern "C" void gte_test_seed_geometry(uint32_t packed, int32_t x16,
     entry.generation = PSXRecomp::GTE::s_geom_generation;
 }
 #endif
+
+/* Trusted-plugin mirror of the per-vertex squash decision above: returns
+ * nonzero exactly when RTPS output X is being scaled this frame, with the
+ * live ratio. Game-owned 2D layers (pre-rendered backdrops that must stay
+ * registered with squashed 3D) apply the same transform through this. */
+extern "C" int psx_mod_ws_squash_params(int32_t* num, int32_t* den) {
+    using namespace PSXRecomp::GTE;
+    if (num)
+        *num = s_ws_xnum;
+    if (den)
+        *den = s_ws_xden;
+    return (s_ws_xnum != s_ws_xden) && !gpu_ws_present_native_43();
+}

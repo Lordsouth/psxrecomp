@@ -1,9 +1,9 @@
 format_version = 5
 id = "psx.enhancement.widescreen"
 version = "1.0.0"
-name = "Widescreen"
+name = "Widescreen (experimental)"
 author = "psxrecomp"
-description = "Widens the 3D projection so more of the world is visible, instead of stretching a 4:3 picture. Off by default."
+description = "Renders gameplay at a wide aspect. Experimental: 3D proportions are correct, but some screen-space 2D (menus, HUD) still renders stretched. Off by default; turn it on here if the trade-off suits you."
 resolver = "declarative"
 save_compatibility = "shared"
 
