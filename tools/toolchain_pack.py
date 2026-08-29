@@ -36,6 +36,30 @@ _ASSET = {
     "macos-x64": "cmake-clang-v1-macos-universal.zip",
 }
 
+# The toolchain is pinned: a fixed release tag plus the SHA-256 of each asset,
+# so a compromised or replaced upstream release cannot reach players. The
+# Windows hash was verified against a locally downloaded copy, not just the
+# GitHub API digest. Bump tag + hashes together when updating.
+PINNED_TAG = "v1.0.14"
+_ASSET_SHA256 = {
+    "cmake-clang-v1-linux-x64.zip":
+        "597c8d343a3cf02ba6f6b2ae7cf6fe2fef125dde8feff62a144e8dd3da3d484e",
+    "cmake-clang-v1-macos-universal.zip":
+        "9db2a9b6ede4162cb19850ee1a08d01147f3ea8bc9b2eefb3ffbdf8b20d389d7",
+    "cmake-clang-v1-windows-x64.zip":
+        "28da9742385e7ff875b3d9311e8ed89dbdc84f27b6ecba2bc0d0acc11f6d2b4d",
+}
+
+
+def _sha256_file(path: Path) -> str:
+    import hashlib
+
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
 
 def sys_platform_is_windows() -> bool:
     return sys.platform == "win32"
@@ -713,6 +737,40 @@ def _register_user_path_windows(bin_dir: Path, pack_root: Path, log=None) -> Non
         pass
 
 
+def _register_toolchain_dir_windows(pack_root: Path, log=None) -> None:
+    """Persist RETCOMM_TOOLCHAIN_DIR only — no PATH edit.
+
+    Later runs (and the deferred-rebuild helper) resolve the toolchain through
+    this one purpose-specific variable or the shared cache scan, so the
+    invasive part of _register_user_path_windows is not needed for anything.
+    """
+    try:
+        import winreg  # type: ignore
+    except ImportError:
+        return
+    try:
+        with winreg.OpenKey(
+            winreg.HKEY_CURRENT_USER, "Environment", 0, winreg.KEY_SET_VALUE
+        ) as key:
+            winreg.SetValueEx(
+                key, "RETCOMM_TOOLCHAIN_DIR", 0, winreg.REG_EXPAND_SZ, str(pack_root)
+            )
+        if log:
+            log(f"Recorded RETCOMM_TOOLCHAIN_DIR = {pack_root}")
+    except OSError as exc:
+        if log:
+            log(f"Could not record RETCOMM_TOOLCHAIN_DIR: {exc}")
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.user32.SendMessageTimeoutW(
+            0xFFFF, 0x001A, 0, "Environment", 0x0002, 5000, None
+        )
+    except Exception:
+        pass
+
+
 def _register_user_path_unix(cache_root: Path, latest: Path, log=None) -> None:
     hook = cache_root / "path.sh"
     hook.write_text(
@@ -784,14 +842,24 @@ def register_toolchain_user_env(pack_root: Path, log=None) -> Path:
     bin_dir = usable / "bin"
     if not bin_looks_usable(bin_dir):
         bin_dir = root / "bin"
-    if sys_platform_is_windows():
-        _register_user_path_windows(bin_dir, usable, log=log)
+    # Persistently editing the user's PATH (registry / shell profiles) is
+    # opt-in: nothing in the product needs it — every consumer resolves the
+    # toolchain through RETCOMM_TOOLCHAIN_DIR or the shared cache scan.
+    if os.environ.get("PSXRECOMP_REGISTER_PATH", "") not in ("", "0"):
+        if sys_platform_is_windows():
+            _register_user_path_windows(bin_dir, usable, log=log)
+        else:
+            _register_user_path_unix(cache_root, usable, log=log)
     else:
-        _register_user_path_unix(cache_root, usable, log=log)
+        if sys_platform_is_windows():
+            _register_toolchain_dir_windows(usable, log=log)
+        if log:
+            log("Skipped persistent PATH edit "
+                "(set PSXRECOMP_REGISTER_PATH=1 to enable)")
     # Session PATH for this process (idempotent).
     activate_toolchain_bin(bin_dir if bin_looks_usable(bin_dir) else root / "bin", log=None)
     if log:
-        log(f"Registered toolchain user PATH via {bin_dir}")
+        log(f"Toolchain active for this session via {bin_dir}")
     return usable
 
 
@@ -881,9 +949,17 @@ def download_latest_pack(
     if not asset:
         raise RuntimeError(f"unknown toolchain artifact: {art}")
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN") or ""
-    url = f"https://github.com/{repo}/releases/latest/download/{asset}"
+    pinned = repo == DEFAULT_REPO
+    if pinned:
+        url = f"https://github.com/{repo}/releases/download/{PINNED_TAG}/{asset}"
+    else:
+        # Custom repo: the pinned hash would be wrong, so fall back to latest
+        # and say so — the caller has taken over the trust decision.
+        url = f"https://github.com/{repo}/releases/latest/download/{asset}"
+        if log:
+            log(f"WARNING: custom repo {repo} — download is not hash-pinned")
     if log:
-        log(f"Downloading {asset} from {repo}...")
+        log(f"Downloading {asset} from {repo} ({PINNED_TAG if pinned else 'latest'})...")
     with tempfile.TemporaryDirectory(prefix="psxrecomp-tc-") as tmp:
         zpath = Path(tmp) / asset
         try:
@@ -892,6 +968,16 @@ def download_latest_pack(
             raise RuntimeError(f"toolchain download failed ({e.code}): {url}") from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"toolchain download failed: {e.reason}") from e
+        if pinned:
+            want = _ASSET_SHA256[asset]
+            got = _sha256_file(zpath)
+            if got != want:
+                raise RuntimeError(
+                    f"toolchain download failed integrity check: {asset} "
+                    f"sha256 {got}, pinned {want}. Refusing to install it."
+                )
+            if log:
+                log(f"Verified {asset} against the pinned SHA-256.")
         # Tag fallback is "offline" — never install *into* latest/; latest is
         # pointer-only (symlink/copy) matching retcomm-toolchains install.sh.
         return install_from_zip(

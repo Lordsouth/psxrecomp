@@ -272,7 +272,15 @@ copy_tree_filtered "${ROOT}/psxrecomp" "${STAGE}/psxrecomp" \
   --exclude 'generated' \
   --exclude '__pycache__' \
   --exclude 'build' \
-  --exclude 'build-*'
+  --exclude 'build-*' \
+  --exclude 'docs/internal' \
+  --exclude 'docs/ecosystem-watch.md' \
+  --exclude 'dummy.*.mcr' \
+  --exclude '.mcp.json' \
+  --exclude 'CLAUDE.md' \
+  --exclude 'tools/aot_overlay_spike' \
+  --exclude 'tools/audio_capture_ab.py' \
+  --exclude 'tools/launch_tomba2_interp_perf.ps1'
 
 copy_tree_filtered "${ROOT}/recomp-ui" "${STAGE}/recomp-ui" \
   --exclude '.git' \

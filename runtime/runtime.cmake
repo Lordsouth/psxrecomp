@@ -943,6 +943,11 @@ function(psxrecomp_add_runtime_target target)
             PSX_OVERLAY_FLAVOR=2)   # PSX_OVERLAY_FLAVOR_PGXP (overlay_api.h)
     endif()
     set_target_properties(${target} PROPERTIES OUTPUT_NAME "${_psxrt_exe_name}")
+    # Strip Release binaries: the multi-MB COFF symbol table + DWARF sections
+    # are pure scanner bait and account for ~30% of the setup host's size.
+    if(WIN32 AND (CMAKE_C_COMPILER_ID MATCHES "GNU|Clang"))
+        target_link_options(${target} PRIVATE "$<$<CONFIG:Release>:-Wl,-s>")
+    endif()
 
     # ---- Windows / desktop app icon ---------------------------------------
     # Prefer an explicit APP_ICON, then the game-repo copy under assets/, then
@@ -970,7 +975,42 @@ function(psxrecomp_add_runtime_target target)
             if(CMAKE_RC_COMPILER)
                 string(REPLACE "\\" "/" _psxrt_ico_fwd "${PSXRT_APP_ICON}")
                 set(_psxrt_rc "${CMAKE_CURRENT_BINARY_DIR}/${target}_app_icon.rc")
-                file(WRITE "${_psxrt_rc}" "IDI_ICON1 ICON \"${_psxrt_ico_fwd}\"\n")
+                # VERSIONINFO: an unsigned exe with no version resource is a
+                # textbook AV-heuristic false-positive profile. Version comes
+                # from the game repo's VERSION file when present.
+                set(_psxrt_ver "0.0.0")
+                if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION")
+                    file(STRINGS "${CMAKE_CURRENT_SOURCE_DIR}/VERSION"
+                         _psxrt_ver_line LIMIT_COUNT 1)
+                    if(_psxrt_ver_line MATCHES "^([0-9]+)\.([0-9]+)\.([0-9]+)")
+                        set(_psxrt_ver "${CMAKE_MATCH_0}")
+                    endif()
+                endif()
+                string(REPLACE "." "," _psxrt_ver_commas "${_psxrt_ver}")
+                string(REPLACE "_" " " _psxrt_product "${_psxrt_exe_name}")
+                file(WRITE "${_psxrt_rc}"
+                    "IDI_ICON1 ICON \"${_psxrt_ico_fwd}\"\n"
+                    "1 VERSIONINFO\n"
+                    "FILEVERSION ${_psxrt_ver_commas},0\n"
+                    "PRODUCTVERSION ${_psxrt_ver_commas},0\n"
+                    "BEGIN\n"
+                    "  BLOCK \"StringFileInfo\"\n"
+                    "  BEGIN\n"
+                    "    BLOCK \"040904b0\"\n"
+                    "    BEGIN\n"
+                    "      VALUE \"FileDescription\", \"${_psxrt_product}\"\n"
+                    "      VALUE \"FileVersion\", \"${_psxrt_ver}\"\n"
+                    "      VALUE \"ProductName\", \"${_psxrt_product}\"\n"
+                    "      VALUE \"ProductVersion\", \"${_psxrt_ver}\"\n"
+                    "      VALUE \"OriginalFilename\", \"${_psxrt_exe_name}.exe\"\n"
+                    "      VALUE \"Comments\", \"Built with psxrecomp. Ships no game data.\"\n"
+                    "    END\n"
+                    "  END\n"
+                    "  BLOCK \"VarFileInfo\"\n"
+                    "  BEGIN\n"
+                    "    VALUE \"Translation\", 0x409, 1200\n"
+                    "  END\n"
+                    "END\n")
                 target_sources(${target} PRIVATE "${_psxrt_rc}")
                 message(STATUS "psxrecomp ${target}: APP_ICON=${PSXRT_APP_ICON} (RC=${CMAKE_RC_COMPILER})")
             else()

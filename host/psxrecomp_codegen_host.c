@@ -1632,6 +1632,138 @@ static int run_cli_posix(char* const argv[],
 /* ---- Host-native toolchain install (no Store Python AppData redirect) ---- */
 
 static const char* k_tc_repo = "TechnicallyComputers/retcomm-toolchains";
+/* The toolchain is pinned: a fixed release tag plus the SHA-256 of the asset,
+ * so a compromised or replaced upstream release cannot reach players. The
+ * Windows hash was verified against a locally downloaded copy, not just the
+ * GitHub API digest. Bump tag + hashes together when updating (and keep
+ * tools/toolchain_pack.py in sync). */
+static const char* k_tc_pinned_tag = "v1.0.14";
+static const char* k_tc_pinned_sha256_win =
+    "28da9742385e7ff875b3d9311e8ed89dbdc84f27b6ecba2bc0d0acc11f6d2b4d";
+static const char* k_tc_pinned_sha256_linux =
+    "597c8d343a3cf02ba6f6b2ae7cf6fe2fef125dde8feff62a144e8dd3da3d484e";
+static const char* k_tc_pinned_sha256_macos =
+    "9db2a9b6ede4162cb19850ee1a08d01147f3ea8bc9b2eefb3ffbdf8b20d389d7";
+
+/* ---- minimal SHA-256 (FIPS 180-4), for toolchain zip verification ---- */
+typedef struct {
+    uint32_t st[8];
+    uint64_t len;
+    unsigned char buf[64];
+    size_t fill;
+} host_sha256_ctx;
+
+static uint32_t hs_rotr(uint32_t x, int n) { return (x >> n) | (x << (32 - n)); }
+
+static void host_sha256_block(host_sha256_ctx* c, const unsigned char* p) {
+    static const uint32_t K[64] = {
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1,
+        0x923f82a4, 0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3,
+        0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786,
+        0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+        0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147,
+        0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13,
+        0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+        0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a,
+        0x5b9cca4f, 0x682e6ff3, 0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208,
+        0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2};
+    uint32_t w[64], a, b, cc, d, e, f, g, h;
+    int i;
+    for (i = 0; i < 16; ++i)
+        w[i] = ((uint32_t)p[i * 4] << 24) | ((uint32_t)p[i * 4 + 1] << 16) |
+               ((uint32_t)p[i * 4 + 2] << 8) | (uint32_t)p[i * 4 + 3];
+    for (i = 16; i < 64; ++i) {
+        uint32_t s0 = hs_rotr(w[i - 15], 7) ^ hs_rotr(w[i - 15], 18) ^ (w[i - 15] >> 3);
+        uint32_t s1 = hs_rotr(w[i - 2], 17) ^ hs_rotr(w[i - 2], 19) ^ (w[i - 2] >> 10);
+        w[i] = w[i - 16] + s0 + w[i - 7] + s1;
+    }
+    a = c->st[0]; b = c->st[1]; cc = c->st[2]; d = c->st[3];
+    e = c->st[4]; f = c->st[5]; g = c->st[6]; h = c->st[7];
+    for (i = 0; i < 64; ++i) {
+        uint32_t S1 = hs_rotr(e, 6) ^ hs_rotr(e, 11) ^ hs_rotr(e, 25);
+        uint32_t ch = (e & f) ^ (~e & g);
+        uint32_t t1 = h + S1 + ch + K[i] + w[i];
+        uint32_t S0 = hs_rotr(a, 2) ^ hs_rotr(a, 13) ^ hs_rotr(a, 22);
+        uint32_t mj = (a & b) ^ (a & cc) ^ (b & cc);
+        uint32_t t2 = S0 + mj;
+        h = g; g = f; f = e; e = d + t1;
+        d = cc; cc = b; b = a; a = t1 + t2;
+    }
+    c->st[0] += a; c->st[1] += b; c->st[2] += cc; c->st[3] += d;
+    c->st[4] += e; c->st[5] += f; c->st[6] += g; c->st[7] += h;
+}
+
+static void host_sha256_init(host_sha256_ctx* c) {
+    c->st[0] = 0x6a09e667; c->st[1] = 0xbb67ae85; c->st[2] = 0x3c6ef372;
+    c->st[3] = 0xa54ff53a; c->st[4] = 0x510e527f; c->st[5] = 0x9b05688c;
+    c->st[6] = 0x1f83d9ab; c->st[7] = 0x5be0cd19;
+    c->len = 0; c->fill = 0;
+}
+
+static void host_sha256_update(host_sha256_ctx* c, const void* data, size_t n) {
+    const unsigned char* p = (const unsigned char*)data;
+    c->len += n;
+    while (n) {
+        size_t take = 64 - c->fill;
+        if (take > n) take = n;
+        memcpy(c->buf + c->fill, p, take);
+        c->fill += take; p += take; n -= take;
+        if (c->fill == 64) { host_sha256_block(c, c->buf); c->fill = 0; }
+    }
+}
+
+static void host_sha256_hex(host_sha256_ctx* c, char out[65]) {
+    unsigned char pad[72];
+    unsigned char dig[32];
+    size_t padlen = (c->fill < 56) ? (56 - c->fill) : (120 - c->fill);
+    uint64_t bits = c->len * 8;
+    int i;
+    memset(pad, 0, sizeof(pad));
+    pad[0] = 0x80;
+    for (i = 0; i < 8; ++i)
+        pad[padlen + i] = (unsigned char)(bits >> (56 - 8 * i));
+    host_sha256_update(c, pad, padlen + 8);
+    for (i = 0; i < 8; ++i) {
+        dig[i * 4] = (unsigned char)(c->st[i] >> 24);
+        dig[i * 4 + 1] = (unsigned char)(c->st[i] >> 16);
+        dig[i * 4 + 2] = (unsigned char)(c->st[i] >> 8);
+        dig[i * 4 + 3] = (unsigned char)c->st[i];
+    }
+    for (i = 0; i < 32; ++i)
+        snprintf(out + i * 2, 3, "%02x", dig[i]);
+}
+
+/* Hex SHA-256 of a file; 0 on I/O failure. */
+static int host_sha256_file(const char* path, char out[65]) {
+    host_sha256_ctx c;
+    unsigned char buf[1 << 16];
+    size_t n;
+    FILE* f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    host_sha256_init(&c);
+    while ((n = fread(buf, 1, sizeof(buf), f)) > 0)
+        host_sha256_update(&c, buf, n);
+    if (ferror(f)) {
+        fclose(f);
+        return 0;
+    }
+    fclose(f);
+    host_sha256_hex(&c, out);
+    return 1;
+}
+
+/* The pinned digest for this host platform's asset. */
+static const char* host_tc_pinned_sha256(void) {
+#if defined(_WIN32)
+    return k_tc_pinned_sha256_win;
+#elif defined(__APPLE__)
+    return k_tc_pinned_sha256_macos;
+#else
+    return k_tc_pinned_sha256_linux;
+#endif
+}
 
 static const char* toolchain_zip_asset_name(void) {
 #if defined(_WIN32)
@@ -2558,9 +2690,10 @@ static int host_download_and_install_toolchain(
     char* err_msg, size_t err_cap) {
     char url[512], zip_path[1400], tmp_dir[1100];
     const char* asset = toolchain_zip_asset_name();
+    /* Pinned tag, not /latest: what players run is exactly what was vetted. */
     snprintf(url, sizeof(url),
-             "https://github.com/%s/releases/latest/download/%s", k_tc_repo,
-             asset);
+             "https://github.com/%s/releases/download/%s/%s", k_tc_repo,
+             k_tc_pinned_tag, asset);
 #if defined(_WIN32)
     {
         char tmp[512];
@@ -2585,6 +2718,28 @@ static int host_download_and_install_toolchain(
     if (!host_download_url_to_file(url, zip_path, err_msg, err_cap)) {
         rmtree_path(tmp_dir);
         return 0;
+    }
+    if (on_progress)
+        on_progress(progress_ctx, 0.45f, "Verifying toolchain integrity...");
+    {
+        char got[65];
+        if (!host_sha256_file(zip_path, got)) {
+            snprintf(err_msg, err_cap,
+                     "Could not read the downloaded toolchain back for "
+                     "verification.");
+            rmtree_path(tmp_dir);
+            return 0;
+        }
+        if (strcmp(got, host_tc_pinned_sha256()) != 0) {
+            snprintf(err_msg, err_cap,
+                     "Toolchain download failed its integrity check "
+                     "(sha256 %.16s... does not match the pinned "
+                     "release %s). Refusing to install it. Retry, or fetch "
+                     "%s from %s yourself and use the zip option.",
+                     got, k_tc_pinned_tag, asset, k_tc_repo);
+            rmtree_path(tmp_dir);
+            return 0;
+        }
     }
     if (!host_install_toolchain_from_zip(zip_path, on_progress, progress_ctx,
                                          err_msg, err_cap)) {
@@ -2980,124 +3135,14 @@ static int host_local_toolchain_version(char* out, size_t cap) {
     return read_pack_version(pack, out, cap);
 }
 
-/* Parse "tag_name":"…" or a …/releases/tag/<ver> URL into *out. */
-static int parse_github_release_tag(const char* text, char* out, size_t cap) {
-    const char* p;
-    size_t i;
-    if (!text || !out || cap < 2)
-        return 0;
-    out[0] = '\0';
-    p = strstr(text, "\"tag_name\"");
-    if (p) {
-        p = strchr(p + 10, '"');
-        if (!p)
-            return 0;
-        ++p;
-        i = 0;
-        while (*p && *p != '"' && i + 1 < cap)
-            out[i++] = *p++;
-        out[i] = '\0';
-        return i > 0;
-    }
-    p = strstr(text, "/releases/tag/");
-    if (!p)
-        return 0;
-    p += strlen("/releases/tag/");
-    i = 0;
-    while (*p && *p != '"' && *p != '\'' && *p != ' ' && *p != '\n' &&
-           *p != '\r' && *p != '?' && *p != '#' && i + 1 < cap)
-        out[i++] = *p++;
-    out[i] = '\0';
-    return i > 0;
-}
-
-/* Query GitHub for the latest cmake-clang-v1 release tag (short timeout). */
+/* The toolchain "remote" version is the pinned tag: no network probe on
+ * launcher open, and "update available" means "older than what this build
+ * was vetted against", never "older than whatever upstream published". */
 static int host_remote_toolchain_version(char* out, size_t cap) {
-    char url[320], tmp[1400], buf[8192];
-    FILE* f;
-    size_t n;
-    char err[256];
     if (!out || cap < 2)
         return 0;
-    out[0] = '\0';
-    snprintf(url, sizeof(url),
-             "https://api.github.com/repos/%s/releases/latest", k_tc_repo);
-#if defined(_WIN32)
-    {
-        char tdir[512];
-        DWORD tn = GetTempPathA(sizeof(tdir), tdir);
-        if (tn == 0 || tn >= sizeof(tdir))
-            return 0;
-        snprintf(tmp, sizeof(tmp), "%spsxrecomp-tc-latest-%lu.json", tdir,
-                 (unsigned long)GetCurrentProcessId());
-    }
-#else
-    snprintf(tmp, sizeof(tmp), "/tmp/psxrecomp-tc-latest-%d.json", (int)getpid());
-#endif
-    /* GitHub API wants a UA; keep the request short so wizard open stays snappy. */
-#if defined(_WIN32)
-    {
-        char cmd[4096];
-        DWORD code = 1;
-        DeleteFileA(tmp);
-        snprintf(cmd, sizeof(cmd),
-                 "curl.exe -fsSL --connect-timeout 5 --max-time 15 "
-                 "-A psxrecomp-codegen -H \"Accept: application/vnd.github+json\" "
-                 "-o \"%s\" \"%s\"",
-                 tmp, url);
-        if (!run_cmdline_wait(cmd, &code) || code != 0 || !path_is_file(tmp)) {
-            /* Fallback via cmd so stdout redirect works under CreateProcess. */
-            DeleteFileA(tmp);
-            snprintf(cmd, sizeof(cmd),
-                     "cmd.exe /C \"curl.exe -fsSIL --connect-timeout 5 "
-                     "--max-time 15 -A psxrecomp-codegen -o NUL "
-                     "-w %%{url_effective} "
-                     "https://github.com/%s/releases/latest > \"%s\"\"",
-                     k_tc_repo, tmp);
-            if (!run_cmdline_wait(cmd, &code) || code != 0 || !path_is_file(tmp))
-                return 0;
-        }
-    }
-#else
-    {
-        char cmd[4096];
-        unlink(tmp);
-        snprintf(cmd, sizeof(cmd),
-                 "curl -fsSL --connect-timeout 5 --max-time 15 "
-                 "-A psxrecomp-codegen -H 'Accept: application/vnd.github+json' "
-                 "-o '%s' '%s'",
-                 tmp, url);
-        if (system(cmd) != 0 || !path_is_file(tmp)) {
-            unlink(tmp);
-            snprintf(cmd, sizeof(cmd),
-                     "curl -fsSIL --connect-timeout 5 --max-time 15 "
-                     "-A psxrecomp-codegen -o /dev/null -w '%%{url_effective}' "
-                     "'https://github.com/%s/releases/latest' > '%s'",
-                     k_tc_repo, tmp);
-            if (system(cmd) != 0 || !path_is_file(tmp))
-                return 0;
-        }
-    }
-#endif
-    (void)err;
-    f = fopen(tmp, "rb");
-    if (!f) {
-#if defined(_WIN32)
-        DeleteFileA(tmp);
-#else
-        unlink(tmp);
-#endif
-        return 0;
-    }
-    n = fread(buf, 1, sizeof(buf) - 1, f);
-    fclose(f);
-#if defined(_WIN32)
-    DeleteFileA(tmp);
-#else
-    unlink(tmp);
-#endif
-    buf[n] = '\0';
-    return parse_github_release_tag(buf, out, cap);
+    snprintf(out, cap, "%s", k_tc_pinned_tag);
+    return out[0] != '\0';
 }
 
 /* 1 = installed pack is older than GitHub /releases/latest (prompt to update).
