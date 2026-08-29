@@ -3443,6 +3443,70 @@ static void raster_triangle(int32_t x0, int32_t y0,
     #undef UNFP
 }
 
+/* ---- [widescreen] ui_offset_squash (EXPERIMENTAL, off unless configured) --
+ * Titles like Digimon World split each gameplay frame into a world layer
+ * (drawn under a camera-pan DR_OFFSET) and a screen-space UI layer introduced
+ * by the game's own DR_OFFSET reset packet -- a static the engine AddPrims
+ * every frame, identified here by its DMA source address. In squash mode the
+ * GTE compresses world X but CPU-built UI is untouched, so the present
+ * stretch leaves menus/HUD wide. This applies the identical truncating
+ * xnum/xden scale to everything drawn from that packet on: the offset scaled
+ * about the display centre, prim X about the (centred) local origin -- one
+ * uniform affine map of the whole UI layer, so multi-prim assemblies stay
+ * connected. The gate is static (wide-squash engaged), NOT the per-frame
+ * gameplay classifier: the classifier needs 3D history and its warmup after
+ * savestate loads left early lists unsquashed. Untextured fullscreen prims
+ * (fades) are exempt. Known open issue (see research/widescreen-w2-dossier):
+ * one scene retained a stale unsquashed dialogue box; feature ships dormant
+ * until that is resolved. */
+static int      ws_ui_squash_cfg = 0;
+static int      ws_ui_phase = 0;
+static uint32_t ws_ui_pkt_base = 0;
+static uint32_t ws_ui_pkt_span = 0;
+static uint64_t ws_ui_scaled_total = 0;
+
+void gpu_ws_set_ui_offset_squash(int on) { ws_ui_squash_cfg = on ? 1 : 0; }
+void gpu_ws_set_ui_offset_packet(uint32_t base, uint32_t span) {
+    ws_ui_pkt_base = base & 0x1FFFFCu;
+    ws_ui_pkt_span = span;
+}
+
+static int ws_ui_on(void) {
+    return ws_ui_squash_cfg && ws_ui_phase && ws_xnum != ws_xden;
+}
+
+static int32_t ws_ui_x(int32_t v) {
+    if (!ws_ui_on()) return v;
+    ws_ui_scaled_total++;
+    return v * ws_xnum / ws_xden;
+}
+
+static void ws_ui_verts_impl(int32_t* vxs, int n, int skip_fullscreen) {
+    if (!ws_ui_on()) return;
+    int32_t lo = vxs[0], hi = vxs[0];
+    for (int i = 1; i < n; i++) {
+        if (vxs[i] < lo) lo = vxs[i];
+        if (vxs[i] > hi) hi = vxs[i];
+    }
+    if (skip_fullscreen && hi - lo >= ws_disp_w())
+        return;   /* untextured fullscreen fade/flash: keep covering */
+    ws_ui_scaled_total++;
+    for (int i = 0; i < n; i++) vxs[i] = vxs[i] * ws_xnum / ws_xden;
+}
+static void ws_ui_verts(int32_t* vxs, int n) { ws_ui_verts_impl(vxs, n, 1); }
+/* textured prims: a full-width textured quad in UI space is content (e.g.
+ * dialogue-box rows), not a fade -- no fullscreen exemption. */
+static void ws_ui_verts_tex(int32_t* vxs, int n) { ws_ui_verts_impl(vxs, n, 0); }
+
+/* rect/sprite: per-edge so shapes sharing an edge cannot crack or seam */
+static void ws_ui_rect(int32_t* x, int* w) {
+    if (!ws_ui_on() || *w <= 0 || *w >= ws_disp_w()) return;
+    ws_ui_scaled_total++;
+    int32_t x1 = (*x + *w) * ws_xnum / ws_xden;
+    *x = *x * ws_xnum / ws_xden;
+    *w = (int)(x1 - *x);
+}
+
 /* Execute mono triangle (GP0 0x20-0x23) */
 static void gp0_exec_mono_tri(void) {
     int semi_trans = (gp0_cmd_buf[0] >> 25) & 1;
@@ -3453,6 +3517,7 @@ static void gp0_exec_mono_tri(void) {
     }
     if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
     ws_nw_hud_shift_vertices(vx, 3);
+    ws_ui_verts(vx, 3);
     for (int i = 0; i < 3; i++) {
         vx[i] += draw_offset_x;
         vy[i] += draw_offset_y;
@@ -3498,6 +3563,7 @@ static void gp0_exec_mono_quad(void) {
     }
     ws_nw_backdrop_stretch_quad(vx, vy);   /* full-frame 2D backdrop stretch (no-op else) */
     ws_nw_hud_shift_vertices(vx, 4);
+    ws_ui_verts(vx, 4);
     for (int i = 0; i < 4; i++) {
         vx[i] += draw_offset_x;
         vy[i] += draw_offset_y;
@@ -3548,6 +3614,7 @@ static void gp0_exec_shaded_tri(void) {
     }
     if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
     ws_nw_hud_shift_vertices(vx, 3);
+    ws_ui_verts(vx, 3);
     for (int i = 0; i < 3; i++) {
         vx[i] += draw_offset_x;
         vy[i] += draw_offset_y;
@@ -3583,6 +3650,7 @@ static void gp0_exec_shaded_quad(void) {
     if (rej_a && rej_b) return;
     ws_nw_backdrop_stretch_quad(vx, vy);   /* full-frame 2D backdrop stretch (sky gradient; no-op else) */
     ws_nw_hud_shift_vertices(vx, 4);
+    ws_ui_verts(vx, 4);
     for (int i = 0; i < 4; i++) {
         vx[i] += draw_offset_x;
         vy[i] += draw_offset_y;
@@ -3672,6 +3740,7 @@ static void gp0_exec_textured_tri(void) {
     if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
 
     ws_nw_hud_shift_vertices(vx, 3);
+    ws_ui_verts_tex(vx, 3);
     for (int i = 0; i < 3; i++) {
         vx[i] += draw_offset_x;
         vy[i] += draw_offset_y;
@@ -3724,6 +3793,7 @@ static void gp0_exec_textured_quad(void) {
     ws_auto_ui_transform_quad(vx, vy);
     ws_nw_backdrop_stretch_quad(vx, vy);   /* full-frame 2D backdrop image stretch (no-op else) */
     ws_nw_hud_shift_vertices(vx, 4);
+    ws_ui_verts_tex(vx, 4);
 
     for (int i = 0; i < 4; i++) {
         vx[i] += draw_offset_x;
@@ -3806,6 +3876,7 @@ static void gp0_exec_shaded_textured_tri(void) {
     if (psx_gpu_triangle_oversize(vx, vy, 0, 1, 2)) return;
 
     ws_nw_hud_shift_vertices(vx, 3);
+    ws_ui_verts_tex(vx, 3);
     for (int i = 0; i < 3; i++) {
         vx[i] += draw_offset_x;
         vy[i] += draw_offset_y;
@@ -3854,6 +3925,7 @@ static void gp0_exec_shaded_textured_quad(void) {
 
     ws_auto_ui_transform_quad(vx, vy);
     ws_nw_hud_shift_vertices(vx, 4);
+    ws_ui_verts_tex(vx, 4);
     for (int i = 0; i < 4; i++) {
         vx[i] += draw_offset_x;
         vy[i] += draw_offset_y;
@@ -3893,6 +3965,7 @@ static void gp0_exec_mono_line(void) {
     if (psx_gpu_line_oversize(x0, y0, x1, y1)) return;
     int32_t vx[2] = { x0, x1 };
     ws_nw_hud_shift_vertices(vx, 2);
+    ws_ui_verts(vx, 2);
     x0 = vx[0]; x1 = vx[1];
     x0 += draw_offset_x; y0 += draw_offset_y;
     x1 += draw_offset_x; y1 += draw_offset_y;
@@ -3915,6 +3988,7 @@ static void gp0_exec_shaded_line(void) {
     if (psx_gpu_line_oversize(x0, y0, x1, y1)) return;
     int32_t vx[2] = { x0, x1 };
     ws_nw_hud_shift_vertices(vx, 2);
+    ws_ui_verts(vx, 2);
     x0 = vx[0]; x1 = vx[1];
     x0 += draw_offset_x; y0 += draw_offset_y;
     x1 += draw_offset_x; y1 += draw_offset_y;
@@ -3937,6 +4011,7 @@ static void gp0_exec_mono_rect(void) {
     if (w > 1023) w = 1023;
     if (h > 511)  h = 511;
     ws_expand_fullscreen_rect(&x0, y0, &w, h);
+    ws_ui_rect(&x0, &w);
     x0 += ws_nw_hud_shift(x0, w);   /* native-wide HUD corner re-anchor (no-op else) */
     x0 += draw_offset_x; y0 += draw_offset_y;
     if (draw_area_out_rect(x0, y0, w, h)) return;
@@ -3970,6 +4045,10 @@ static void gp0_exec_textured_rect(void) {
         if (ws_tagged_anchor(&ws_ax)) {
             x0 = ws_scale_about(x0, ws_ax);
             ws_w = (int)ws_scale_len(w);
+        } else if (ws_ui_on()) {
+            int wq = w;
+            ws_ui_rect(&x0, &wq);
+            ws_w = wq;
         } else {
             int corrected_w = w;
             if (ws_auto_ui_transform_rect(&x0, y0, &corrected_w, h))
@@ -4001,6 +4080,7 @@ static void gp0_exec_mono_dot(void) {
     uint16_t color = rgb888_to_rgb555(gp0_cmd_buf[0] & 0xFFFFFFu);
     int32_t x, y;
     parse_vertex(gp0_cmd_buf[1], &x, &y);
+    x = ws_ui_x(x);
     x += ws_nw_hud_shift(x, 1);
     x += draw_offset_x; y += draw_offset_y;
     if (draw_area_out_point(x, y)) return;
@@ -4016,6 +4096,7 @@ static void gp0_exec_textured_8x8(void) {
     int32_t x0, y0;
     parse_vertex(gp0_cmd_buf[1], &x0, &y0);
     int ws_w = ws_sprt_fixed_transform(&x0, y0, 8);
+    if (!ws_w && ws_ui_on()) { int wq = 8; ws_ui_rect(&x0, &wq); ws_w = wq; }
     x0 += ws_nw_hud_shift(x0, 8);   /* native-wide HUD corner re-anchor (no-op else) */
     x0 += draw_offset_x; y0 += draw_offset_y;
     {
@@ -4042,11 +4123,13 @@ static void gp0_exec_mono_8x8(void) {
     uint16_t color = rgb888_to_rgb555(gp0_cmd_buf[0] & 0xFFFFFFu);
     int32_t x0, y0;
     parse_vertex(gp0_cmd_buf[1], &x0, &y0);
-    x0 += ws_nw_hud_shift(x0, 8);
+    int w8 = 8;
+    ws_ui_rect(&x0, &w8);
+    x0 += ws_nw_hud_shift(x0, w8);
     x0 += draw_offset_x; y0 += draw_offset_y;
-    if (draw_area_out_rect(x0, y0, 8, 8)) return;
+    if (draw_area_out_rect(x0, y0, w8, 8)) return;
     gr_set_semi_transparency(semi_trans, (int)semi_transparency);
-    gr_draw_flat_rect(x0, y0, 8, 8, color);
+    gr_draw_flat_rect(x0, y0, w8, 8, color);
 }
 
 /* Execute 16x16 textured sprite (GP0 0x7C-0x7F) */
@@ -4060,6 +4143,7 @@ static void gp0_exec_textured_16x16(void) {
      * classifier cannot distinguish an authored layer entering the reveal from
      * a stale ring slot; suppressing here caused the stage-start black flicker. */
     int ws_w = ws_sprt_fixed_transform(&x0, y0, 16);
+    if (!ws_w && ws_ui_on()) { int wq = 16; ws_ui_rect(&x0, &wq); ws_w = wq; }
     x0 += ws_nw_hud_shift(x0, 16);   /* native-wide HUD corner re-anchor (no-op else) */
     x0 += draw_offset_x; y0 += draw_offset_y;
     int u0 = gp0_cmd_buf[2] & 0xFF;
@@ -4185,6 +4269,22 @@ static void gp0_exec_draw_offset(void) {
     /* Native-wide mirrors framebuffer draws into a separate wide surface (canonical
      * VRAM stays faithful); the renderer needs the live draw offset to translate
      * into surface-local coords, so keep gr_set_draw_offset current. */
+    /* ui_offset_squash: the game's own UI DR_OFFSET reset packet flips the
+     * UI phase on (identified by DMA source address); any other offset (a
+     * camera pan) flips it off. In phase, scale the offset about the display
+     * centre so each UI chunk composes into the same uniform squash. */
+    if (ws_ui_squash_cfg && ws_ui_pkt_span) {
+        int from_ui_pkt = 0;
+        if (gp0_cmd_source_addr != 0xFFFFFFFFu) {
+            uint32_t src = gp0_cmd_source_addr & 0x1FFFFCu;
+            from_ui_pkt = src >= ws_ui_pkt_base &&
+                          src < ws_ui_pkt_base + ws_ui_pkt_span;
+        }
+        ws_ui_phase = from_ui_pkt ? 1 : 0;
+        if (ws_ui_phase && ws_xnum != ws_xden)
+            draw_offset_x = ws_disp_w() / 2
+                + (draw_offset_x - ws_disp_w() / 2) * ws_xnum / ws_xden;
+    }
     gr_set_draw_offset(draw_offset_x, draw_offset_y);
 }
 
@@ -4976,6 +5076,7 @@ static void gp0_execute_command(void) {
             int32_t x0, y0;
             parse_vertex(gp0_cmd_buf[1], &x0, &y0);
             (void)ws_sprt_fixed_transform(&x0, y0, 1);  /* position only; 1px stays 1px */
+            x0 = ws_ui_x(x0);
             x0 += draw_offset_x; y0 += draw_offset_y;
             int u0 = gp0_cmd_buf[2] & 0xFF;
             int v0 = (gp0_cmd_buf[2] >> 8) & 0xFF;
@@ -4998,9 +5099,13 @@ static void gp0_execute_command(void) {
             uint16_t color = rgb888_to_rgb555(gp0_cmd_buf[0] & 0xFFFFFFu);
             int32_t x0, y0;
             parse_vertex(gp0_cmd_buf[1], &x0, &y0);
-            x0 += draw_offset_x; y0 += draw_offset_y;
-            gr_set_semi_transparency(semi_trans, (int)semi_transparency);
-            gr_draw_flat_rect(x0, y0, 16, 16, color);
+            {
+                int w16 = 16;
+                ws_ui_rect(&x0, &w16);
+                x0 += draw_offset_x; y0 += draw_offset_y;
+                gr_set_semi_transparency(semi_trans, (int)semi_transparency);
+                gr_draw_flat_rect(x0, y0, w16, 16, color);
+            }
             break;
         }
         case 0x7C: case 0x7D: case 0x7E: case 0x7F:
@@ -5166,7 +5271,7 @@ static void gpu_write_gp0_body(uint32_t val) {
         }
         int32_t x, y;
         parse_vertex(val, &x, &y);
-        x += draw_offset_x; y += draw_offset_y;
+        x = ws_ui_x(x) + draw_offset_x; y += draw_offset_y;
         if (polyline_has_prev &&
             !psx_gpu_line_oversize(polyline_prev_x, polyline_prev_y, x, y)) {
             gr_draw_line(polyline_prev_x, polyline_prev_y, x, y, polyline_color);
@@ -5193,7 +5298,7 @@ static void gpu_write_gp0_body(uint32_t val) {
             /* First vertex */
             int32_t x, y;
             parse_vertex(val, &x, &y);
-            x += draw_offset_x; y += draw_offset_y;
+            x = ws_ui_x(x) + draw_offset_x; y += draw_offset_y;
             polyline_prev_x = x; polyline_prev_y = y;
             polyline_prev_c = polyline_color;
             polyline_has_prev = 1;
@@ -5209,7 +5314,7 @@ static void gpu_write_gp0_body(uint32_t val) {
         {
             int32_t x, y;
             parse_vertex(val, &x, &y);
-            x += draw_offset_x; y += draw_offset_y;
+            x = ws_ui_x(x) + draw_offset_x; y += draw_offset_y;
             if (!psx_gpu_line_oversize(polyline_prev_x, polyline_prev_y, x, y))
                 gr_draw_shaded_line(polyline_prev_x, polyline_prev_y,
                                     polyline_prev_c, x, y, polyline_color);

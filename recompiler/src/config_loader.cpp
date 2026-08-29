@@ -1360,6 +1360,9 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     bool ws_auto_ui_squash = false;
     bool ws_full_2d = false;
     bool ws_gte_game_mode = false;
+    bool ws_ui_offset_squash = false;
+    uint32_t ws_ui_offset_packet_addr = 0;
+    uint32_t ws_ui_offset_packet_span = 0;
     bool ws_precise_nclip = false;
     uint32_t ws_gameplay_state_addr = 0;
     std::vector<uint32_t> ws_gameplay_state_values;
@@ -1508,6 +1511,15 @@ GameConfig load_game_config(const fs::path& config_path_in) {
             ws_full_2d = toml::find<bool>(ws, "full_2d");
         if (ws.contains("gte_game_mode"))
             ws_gte_game_mode = toml::find<bool>(ws, "gte_game_mode");
+        if (ws.contains("ui_offset_squash"))
+            ws_ui_offset_squash = toml::find<bool>(ws, "ui_offset_squash");
+        if (ws.contains("ui_offset_packet_addr"))
+            ws_ui_offset_packet_addr = parse_hex(
+                toml::find<std::string>(ws, "ui_offset_packet_addr"),
+                "widescreen.ui_offset_packet_addr");
+        if (ws.contains("ui_offset_packet_span"))
+            ws_ui_offset_packet_span = static_cast<uint32_t>(
+                toml::find<int64_t>(ws, "ui_offset_packet_span"));
         if (ws.contains("precise_nclip"))
             ws_precise_nclip = toml::find<bool>(ws, "precise_nclip");
         const bool has_gameplay_state_addr = ws.contains("gameplay_state_addr");
@@ -2014,7 +2026,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         }
     }
 
-    return GameConfig{
+    GameConfig loaded_cfg{
         /*config_path*/      config_path,
         /*project_root*/     root,
         /*name*/             name,
@@ -2127,6 +2139,10 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_bg2d_init_func*/     ws_bg2d_init_func,
         /*ws_bg2d_packet_cap*/    ws_bg2d_packet_cap,
     };
+    loaded_cfg.ws_ui_offset_squash = ws_ui_offset_squash;
+    loaded_cfg.ws_ui_offset_packet_addr = ws_ui_offset_packet_addr;
+    loaded_cfg.ws_ui_offset_packet_span = ws_ui_offset_packet_span;
+    return loaded_cfg;
 }
 
 // ---- GameOptions (game_options.toml) — the game's own native settings ----

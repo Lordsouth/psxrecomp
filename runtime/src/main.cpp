@@ -10743,6 +10743,9 @@ int main(int argc, char** argv) {
                                   gc.ws_bg2d_packet_cap);
             /* [widescreen] gte_game_mode — 3D-title gameplay detector (Ape). */
             gpu_ws_set_gte_game_mode(gc.ws_gte_game_mode ? 1 : 0);
+            gpu_ws_set_ui_offset_squash(gc.ws_ui_offset_squash ? 1 : 0);
+            gpu_ws_set_ui_offset_packet(gc.ws_ui_offset_packet_addr,
+                                        gc.ws_ui_offset_packet_span);
             gpu_ws_set_precise_nclip(gc.ws_precise_nclip ? 1 : 0);
             gpu_ws_set_gameplay_state_gate(
                 gc.ws_gameplay_state_addr,

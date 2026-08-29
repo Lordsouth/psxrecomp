@@ -1097,6 +1097,12 @@ struct GameConfig {
     //   reveal pixels once before the new stage background is submitted.
     uint32_t ws_bg2d_init_func    = 0;
     uint32_t ws_bg2d_packet_cap       = 1000;
+
+    // [widescreen] ui_offset_squash -- DR_OFFSET-phased UI counter-squash.
+    // Kept off the positional aggregate init; assigned after construction.
+    bool ws_ui_offset_squash = false;
+    uint32_t ws_ui_offset_packet_addr = 0;
+    uint32_t ws_ui_offset_packet_span = 0;
 };
 
 // UserSettings — the launcher-written, user-editable override layer.
