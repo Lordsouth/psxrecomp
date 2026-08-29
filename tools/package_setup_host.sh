@@ -250,10 +250,26 @@ copy_tree_filtered() {
   if command -v rsync >/dev/null 2>&1; then
     rsync -a "$@" "${src}/" "${dest}/"
   else
+    # No rsync (stock Git Bash): copy, then apply the SAME --exclude list.
+    # Patterns containing '/' are anchored at the tree root; bare names are
+    # matched anywhere, mirroring rsync's semantics closely enough.
     cp -a "${src}/." "${dest}/"
-    rm -rf "${dest}/.git" "${dest}/recompiler/build" "${dest}/generated" 2>/dev/null || true
-    find "${dest}" -type d -name '__pycache__' -prune -exec rm -rf {} + 2>/dev/null || true
-    find "${dest}" -type d \( -name 'build' -o -name 'build-*' \) -prune -exec rm -rf {} + 2>/dev/null || true
+    local pat
+    while [ $# -gt 0 ]; do
+      if [ "$1" = "--exclude" ] && [ -n "${2:-}" ]; then
+        pat="$2"; shift 2
+        case "${pat}" in
+          */*)
+            rm -rf "${dest}/"${pat} 2>/dev/null || true
+            ;;
+          *)
+            find "${dest}" -name "${pat}" -prune -exec rm -rf {} + 2>/dev/null || true
+            ;;
+        esac
+      else
+        shift
+      fi
+    done
   fi
 }
 
@@ -289,6 +305,18 @@ copy_tree_filtered "${ROOT}/recomp-ui" "${STAGE}/recomp-ui" \
 
 # Never ship game generated C or common disc working trees.
 rm -rf "${STAGE}/generated" "${STAGE}/bpe" "${STAGE}/motk" "${STAGE}/disc"
+
+# Never ship mod packages whose generated manifests mark themselves as
+# non-redistributable (they embed another work's bytes). --project-dir mods
+# sweeps in the whole working tree, so the purge happens here, every time,
+# instead of relying on a by-hand check.
+if [ -d "${STAGE}/mods/packages" ]; then
+  grep -rl "DO NOT COMMIT" "${STAGE}/mods/packages" 2>/dev/null | while IFS= read -r m; do
+    pkg_dir="$(dirname "$(dirname "${m}")")"
+    echo "purging do-not-ship mod package: ${pkg_dir#"${STAGE}"/}"
+    rm -rf "${pkg_dir}"
+  done
+fi
 
 STAGE_SDK="${SCRIPT_DIR}/stage_setup_sdk.sh"
 if [[ ! -f "${STAGE_SDK}" ]]; then
