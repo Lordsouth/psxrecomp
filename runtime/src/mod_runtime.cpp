@@ -1127,6 +1127,12 @@ const std::string& mod_runtime_fingerprint() {
     return state().plan.fingerprint;
 }
 
+/* C shim for debug_server.c's "mod_plan" command. The string is owned by the
+ * plan and outlives any call; callers only format it into a reply. */
+extern "C" const char *mod_runtime_fingerprint_c(void) {
+    return mod_runtime_fingerprint().c_str();
+}
+
 const std::filesystem::path& mod_runtime_effective_disc_path() {
     return state().effective_disc_path;
 }

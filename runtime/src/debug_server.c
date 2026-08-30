@@ -5176,6 +5176,103 @@ static void handle_write_ram(int id, const char *json)
     send_ok(id);
 }
 
+/* "write_ram_bytes" — bulk guest write, applied inside ONE safe point, verified.
+ *
+ * Two problems with driving a test harness off write_ram:
+ *
+ * 1. It writes one byte per request, and every request lands on a different
+ *    debug_server_poll() safe point — so a multi-byte struct write TEARS across
+ *    guest frames, and a state-machine kick assembled from several writes can be
+ *    observed half-applied by the very code it is trying to trigger. No amount
+ *    of client-side ordering fixes that; the whole payload has to land between
+ *    two guest instructions. It does here.
+ *
+ * 2. It answers ok:true unconditionally, but psx_write_byte silently DISCARDS
+ *    the store when COP0 SR bit 16 (cache-isolate) is set or the address is
+ *    >= 0xC0000000. A harness that trusts ok:true then tests a value that was
+ *    never written — a confident false result, the worst kind. Every byte is
+ *    read back here and a discard is reported as an error.
+ *
+ * Params: addr (STRING, hex, "0x..." optional), hex (STRING, an even number of
+ * hex digits — the payload). Note json_get_str hands quoted tokens to
+ * hex_to_u32, which is ALWAYS base 16; that is why this takes a hex payload
+ * rather than a decimal length + values.
+ */
+static void handle_write_ram_bytes(int id, const char *json)
+{
+    char addr_str[32];
+    if (!json_get_str(json, "addr", addr_str, sizeof(addr_str))) {
+        send_err(id, "missing addr"); return;
+    }
+    uint32_t addr = hex_to_u32(addr_str);
+
+    char *hex = (char *)malloc(RECV_BUF_SIZE);
+    if (!hex) { send_err(id, "alloc failed"); return; }
+    if (!json_get_str(json, "hex", hex, RECV_BUF_SIZE)) {
+        free(hex); send_err(id, "missing hex"); return;
+    }
+    size_t hl = strlen(hex);
+    if (hl == 0 || (hl & 1u)) {
+        free(hex); send_err(id, "hex must be a non-empty even number of digits");
+        return;
+    }
+    size_t n = hl / 2u;
+
+    uint8_t *bytes = (uint8_t *)malloc(n);
+    if (!bytes) { free(hex); send_err(id, "alloc failed"); return; }
+    for (size_t i = 0; i < n; i++) {
+        char pair[3];
+        char *end = NULL;
+        pair[0] = hex[i * 2]; pair[1] = hex[i * 2 + 1]; pair[2] = '\0';
+        bytes[i] = (uint8_t)strtoul(pair, &end, 16);
+        if (end != pair + 2) {
+            free(hex); free(bytes);
+            send_err(id, "bad hex digit"); return;
+        }
+    }
+    free(hex);
+
+    for (size_t i = 0; i < n; i++)
+        psx_write_byte(addr + (uint32_t)i, bytes[i]);
+
+    long bad = -1;
+    uint8_t want = 0, got = 0;
+    for (size_t i = 0; i < n; i++) {
+        uint8_t r = psx_read_byte(addr + (uint32_t)i);
+        if (r != bytes[i]) {
+            bad = (long)i; want = bytes[i]; got = r; break;
+        }
+    }
+    free(bytes);
+
+    if (bad >= 0) {
+        char msg[192];
+        snprintf(msg, sizeof(msg),
+                 "write discarded at 0x%08X (+%ld): wrote %02x, read back %02x "
+                 "-- cache-isolate set, or address not writable",
+                 addr + (uint32_t)bad, bad, want, got);
+        send_err(id, msg);
+        return;
+    }
+    send_fmt("{\"id\":%d,\"ok\":true,\"addr\":\"0x%08X\",\"len\":%u,"
+             "\"verified\":true}", id, addr, (unsigned)n);
+}
+
+/* "mod_plan" — the active mod-plan fingerprint, which otherwise exists only on
+ * stdout ("applied mod plan <hash>"). A test harness must be able to prove it
+ * is talking to the build it thinks it is: a savestate or a stale staged
+ * manifest silently changes what is loaded, and every downstream assertion is
+ * then measuring the wrong thing. */
+extern const char *mod_runtime_fingerprint_c(void);
+
+static void handle_mod_plan(int id, const char *json)
+{
+    (void)json;
+    const char *fp = mod_runtime_fingerprint_c();
+    send_fmt("{\"id\":%d,\"ok\":true,\"fingerprint\":\"%s\"}",
+             id, fp ? fp : "");
+}
+
 /* geom_correction — is [video] geometry_correction / perspective_texturing
  * actually doing anything on THIS title?
  *
@@ -13350,6 +13447,8 @@ static const CmdEntry s_commands[] = {
     { "read_ram",          handle_read_ram },
     { "dump_ram",          handle_read_ram },   /* alias: one request, one response */
     { "write_ram",         handle_write_ram },
+    { "write_ram_bytes",   handle_write_ram_bytes },
+    { "mod_plan",          handle_mod_plan },
     { "gpu_state",         handle_gpu_state },
     { "geom_correction",   handle_geom_correction },
     { "pgxp",              handle_pgxp },
