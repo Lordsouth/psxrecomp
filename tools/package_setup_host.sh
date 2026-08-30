@@ -311,11 +311,37 @@ rm -rf "${STAGE}/generated" "${STAGE}/bpe" "${STAGE}/motk" "${STAGE}/disc"
 # sweeps in the whole working tree, so the purge happens here, every time,
 # instead of relying on a by-hand check.
 if [ -d "${STAGE}/mods/packages" ]; then
-  grep -rl "DO NOT COMMIT" "${STAGE}/mods/packages" 2>/dev/null | while IFS= read -r m; do
-    pkg_dir="$(dirname "$(dirname "${m}")")"
-    echo "purging do-not-ship mod package: ${pkg_dir#"${STAGE}"/}"
-    rm -rf "${pkg_dir}"
+  # Purge on ANY of several markers, not one exact phrase -- a generated
+  # manifest that embeds another work's bytes must never be redistributed,
+  # and a reworded header must not silently defeat the guard.
+  for marker in "DO NOT COMMIT" "do-not-ship" "non-redistributable"; do
+    grep -rl "${marker}" "${STAGE}/mods/packages" 2>/dev/null | while IFS= read -r m; do
+      pkg_dir="$(dirname "$(dirname "${m}")")"
+      [ -d "${pkg_dir}" ] || continue
+      echo "purging do-not-ship mod package: ${pkg_dir#"${STAGE}"/}"
+      rm -rf "${pkg_dir}"
+    done
   done
+
+  # Positive post-condition: refuse to build a package that still contains a
+  # marker, or any package on the explicit never-ship list. A silent failure
+  # here would redistribute a third party's bytes, so this is fatal, not a
+  # warning.
+  leftover=""
+  for marker in "DO NOT COMMIT" "do-not-ship" "non-redistributable"; do
+    hit="$(grep -rl "${marker}" "${STAGE}/mods/packages" 2>/dev/null || true)"
+    [ -n "${hit}" ] && leftover="${leftover}${hit}\n"
+  done
+  for never in dw.vanilla.vice dw.vice.vice; do
+    [ -e "${STAGE}/mods/packages/${never}" ] && \
+      leftover="${leftover}${STAGE}/mods/packages/${never}\n"
+  done
+  if [ -n "${leftover}" ]; then
+    echo "error: non-redistributable mod package survived staging:" >&2
+    printf '%b' "${leftover}" >&2
+    exit 1
+  fi
+  echo "mod packages staged: $(ls -1 "${STAGE}/mods/packages" 2>/dev/null | tr '\n' ' ')"
 fi
 
 STAGE_SDK="${SCRIPT_DIR}/stage_setup_sdk.sh"
