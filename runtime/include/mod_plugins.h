@@ -26,6 +26,28 @@ int psx_mod_register_function_entry_plugin(
 /* Called only from generated functions explicitly listed by the game config. */
 void psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
 
+/*
+ * Native function replacement. A callback returns nonzero to CLAIM the call:
+ * it has computed the result, written it to cpu->gpr[2] ($v0) and published
+ * the return address (cpu->pc = cpu->gpr[31]), so the caller resumes exactly
+ * as from a normal return. Returning zero lets the original guest body run.
+ *
+ * Generated bodies of functions listed in [recompiler]
+ * mod_function_replace_funcs open with
+ *     if (psx_mod_function_replace(cpu, addr)) return;
+ *
+ * NEVER combine this with a code patch on the same function. Writing guest
+ * code marks the range executable-dirty, dispatch then rejects the compiled
+ * body and interprets it, and this hook -- which lives inside that body --
+ * never runs. Replacement works precisely BECAUSE the guest image is left
+ * byte-identical to the pristine text image.
+ */
+typedef int (*PSXModFunctionReplaceCallback)(struct CPUState* cpu,
+                                             uint32_t address);
+int psx_mod_register_function_replace_plugin(
+    const char* id, uint32_t address, PSXModFunctionReplaceCallback callback);
+int psx_mod_function_replace(struct CPUState* cpu, uint32_t address);
+
 /* Narrow guest services available to trusted plugin callbacks. */
 int psx_mod_game_started(void);
 uint8_t psx_mod_read_byte(uint32_t address);

@@ -67,6 +67,14 @@ struct CodeGenConfig {
     // Only explicitly listed guest functions call the runtime dispatcher.
     std::set<uint32_t> mod_function_entry_funcs;
 
+    // Trusted native function replacement ([recompiler]
+    // mod_function_replace_funcs). Emits a CLAIMING hook at the top of the
+    // body -- if the plugin handles the call it writes $v0, publishes $ra into
+    // cpu->pc and the generated body returns immediately. Deliberately not a
+    // code patch: patching a body makes the runtime refuse its compiled form
+    // and interpret it instead, which would skip the hook entirely.
+    std::set<uint32_t> mod_function_replace_funcs;
+
     // [recompiler] hot_funcs: emit __attribute__((hot)) on these guest
     // addresses (MotK VLC leaves, etc.). Host locality hint only.
     std::set<uint32_t> hot_funcs;

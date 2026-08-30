@@ -779,6 +779,23 @@ struct GameConfig {
     // default, so projects that do not opt in emit no callback overhead.
     std::vector<uint32_t> mod_function_entry_funcs;
 
+    // [recompiler] mod_function_replace_funcs: guest functions whose body a
+    // trusted plugin may CLAIM outright. Emits
+    //     if (psx_mod_function_replace(cpu, ADDR)) return;
+    // at the top of the body, mirroring psx_vsync_query_hle_enter and
+    // psx_datashard_enter. The callback computes the result, writes $v0, and
+    // publishes $ra into cpu->pc; the caller resumes as from a normal return.
+    //
+    // WHY THIS EXISTS RATHER THAN PATCHING A PROLOGUE TO "jr $ra": writing
+    // guest code marks the range executable-dirty, dispatch then compares the
+    // function's emitted range against the pristine text image, refuses the
+    // compiled body and falls to the interpreter -- but the hook lives INSIDE
+    // that refused body, so it would never fire. Not patching is the guarantee.
+    // The image stays byte-identical, native dispatch is kept, and the emitted
+    // early return runs. A replaced function must carry no code patch from any
+    // mod, or it is interpreter-resident and this silently does nothing.
+    std::vector<uint32_t> mod_function_replace_funcs;
+
     // [recompiler] hot_funcs: guest addresses that get __attribute__((hot))
     // on their generated C bodies (profile/host locality; no guest semantics).
     std::vector<uint32_t> hot_funcs;

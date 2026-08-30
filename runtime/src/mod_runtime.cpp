@@ -86,6 +86,17 @@ std::vector<FunctionEntryPlugin>& function_entry_plugins() {
     return value;
 }
 
+struct FunctionReplacePlugin {
+    std::string id;
+    uint32_t address = 0;
+    PSXModFunctionReplaceCallback callback = nullptr;
+};
+
+std::vector<FunctionReplacePlugin>& function_replace_plugins() {
+    static std::vector<FunctionReplacePlugin> value;
+    return value;
+}
+
 const ModPackage* selected_package(const std::string& id) {
     return state().manager.selected_package(id);
 }
@@ -1314,6 +1325,34 @@ extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {
     for (const FunctionEntryPlugin& plugin : function_entry_plugins()) {
         if (plugin.address == address) plugin.callback(cpu, address);
     }
+}
+
+extern "C" int psx_mod_register_function_replace_plugin(
+    const char* id, uint32_t address, PSXModFunctionReplaceCallback callback) {
+    using namespace PSXRecompV4;
+    if (!id || !*id || !address || !callback) return 0;
+    auto& plugins = function_replace_plugins();
+    const auto duplicate = std::find_if(
+        plugins.begin(), plugins.end(), [&](const FunctionReplacePlugin& item) {
+            return item.id == id && item.address == address;
+        });
+    if (duplicate != plugins.end()) return 0;
+    plugins.push_back(FunctionReplacePlugin{id, address, callback});
+    return 1;
+}
+
+/* First callback to claim wins; the generated body then returns immediately.
+ * Registration is not the same as being active -- like the entry hooks, these
+ * fire whether or not the owning feature was selected, so a callback must
+ * decide for itself and return 0 when its feature is off. */
+extern "C" int psx_mod_function_replace(CPUState* cpu, uint32_t address) {
+    using namespace PSXRecompV4;
+    if (!cpu) return 0;
+    for (const FunctionReplacePlugin& plugin : function_replace_plugins()) {
+        if (plugin.address == address && plugin.callback(cpu, address))
+            return 1;
+    }
+    return 0;
 }
 
 extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
