@@ -779,6 +779,11 @@ struct GameConfig {
     // default, so projects that do not opt in emit no callback overhead.
     std::vector<uint32_t> mod_function_entry_funcs;
 
+    // [recompiler] mod_function_exit_funcs: guest functions that call a plugin
+    // at their own `jr $ra`. The companion to an entry hook, for state that
+    // must be perturbed only for the duration of one call.
+    std::vector<uint32_t> mod_function_exit_funcs;
+
     // [recompiler] mod_function_replace_funcs: guest functions whose body a
     // trusted plugin may CLAIM outright. Emits
     //     if (psx_mod_function_replace(cpu, ADDR)) return;

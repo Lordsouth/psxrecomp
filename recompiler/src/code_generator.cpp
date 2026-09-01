@@ -2235,6 +2235,14 @@ std::string CodeGenerator::translate_basic_block(
                         ss << config_.indent
                            << "gte_ws_set_suppress(0);  /* widescreen: end far-backdrop un-squash (8C) */\n";
                     }
+                    if (config_.mod_function_exit_funcs.count(
+                            cfg.function_start)) {
+                        ss << config_.indent
+                           << fmt::format(
+                                  "psx_mod_function_exit(cpu, 0x{:08X}u);"
+                                  "  /* trusted opt-in game-mod exit hook */\n",
+                                  cfg.function_start);
+                    }
                     if (config_.data_shard_funcs.count(cfg.function_start)) {
                         // Capture finalize: fires only when this is the armed
                         // function's own return (sp/ra checked runtime-side).
@@ -3201,6 +3209,7 @@ void CodeGenerator::emit_runtime_externs(std::ostream& ss) const {
     ss << "extern void psx_mod_function_entry(CPUState* cpu, uint32_t address);  /* trusted opt-in game-mod hook */\n";
     ss << "extern int  psx_mod_function_replace(CPUState* cpu, uint32_t address);  /* trusted opt-in native function replacement */\n";
     ss << "extern void psx_datashard_ret(CPUState* cpu);                  /* data-shard capture finalize */\n";
+    ss << "extern void psx_mod_function_exit(CPUState* cpu, uint32_t address);  /* game-mod exit hook */\n";
     ss << "extern int  psx_vsync_query_hle_enter(CPUState* cpu, uint32_t func, uint32_t counter_addr, uint32_t gpustat_ptr_addr, uint32_t timer1_ptr_addr, uint32_t timer1_cache_addr);  /* load_accel.c */\n";
     ss << "extern void psx_ws_sprite_tag(CPUState* cpu);  /* widescreen prim tag (gpu.c) */\n";
     ss << "extern void psx_ws_mmx6_bg_stage_init(void);    /* ws 2D stage reveal invalidation (gpu.c) */\n";

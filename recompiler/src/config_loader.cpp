@@ -60,6 +60,7 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
 
     h.words("sprite_tag_funcs", c.ws_sprite_tag_funcs);
     h.words("mod_function_entry_funcs", c.mod_function_entry_funcs);
+    h.words("mod_function_exit_funcs", c.mod_function_exit_funcs);
     h.words("mod_function_replace_funcs", c.mod_function_replace_funcs);
     h.words("cull_bias", c.ws_cull_bias_sites);
     h.words("cull_range", c.ws_cull_range_sites);
@@ -1408,6 +1409,16 @@ GameConfig load_game_config(const fs::path& config_path_in) {
             mod_function_entry_funcs.push_back(
                 parse_hex(a, "recompiler.mod_function_entry_funcs"));
     }
+    // Optional trusted game-mod EXIT hooks (fire at the function's jr $ra).
+    std::vector<uint32_t> mod_function_exit_funcs;
+    if (recomp.contains("mod_function_exit_funcs")) {
+        const auto& arr = toml::find<std::vector<std::string>>(
+            recomp, "mod_function_exit_funcs");
+        for (const auto& a : arr)
+            mod_function_exit_funcs.push_back(
+                parse_hex(a, "recompiler.mod_function_exit_funcs"));
+    }
+
     // Optional trusted native function replacement (a claiming hook).
     std::vector<uint32_t> mod_function_replace_funcs;
     if (recomp.contains("mod_function_replace_funcs")) {
@@ -2074,6 +2085,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
         /*ws_auto_ui_squash*/      ws_auto_ui_squash,
         /*data_shard_funcs*/      data_shard_funcs,
         /*mod_function_entry_funcs*/ mod_function_entry_funcs,
+        /*mod_function_exit_funcs*/ mod_function_exit_funcs,
         /*mod_function_replace_funcs*/ mod_function_replace_funcs,
         /*hot_funcs*/             hot_funcs,
         /*load_charge_batch*/     load_charge_batch,

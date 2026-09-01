@@ -87,6 +87,13 @@ std::vector<FunctionEntryPlugin>& function_entry_plugins() {
     return value;
 }
 
+using FunctionExitPlugin = FunctionEntryPlugin;
+
+std::vector<FunctionExitPlugin>& function_exit_plugins() {
+    static std::vector<FunctionExitPlugin> value;
+    return value;
+}
+
 struct FunctionReplacePlugin {
     std::string id;
     uint32_t address = 0;
@@ -1331,6 +1338,28 @@ extern "C" void psx_mod_function_entry(CPUState* cpu, uint32_t address) {
     using namespace PSXRecompV4;
     if (!cpu) return;
     for (const FunctionEntryPlugin& plugin : function_entry_plugins()) {
+        if (plugin.address == address) plugin.callback(cpu, address);
+    }
+}
+
+extern "C" int psx_mod_register_function_exit_plugin(
+    const char* id, uint32_t address, PSXModFunctionEntryCallback callback) {
+    using namespace PSXRecompV4;
+    if (!id || !*id || !address || !callback) return 0;
+    auto& plugins = function_exit_plugins();
+    const auto duplicate = std::find_if(
+        plugins.begin(), plugins.end(), [&](const FunctionExitPlugin& item) {
+            return item.id == id && item.address == address;
+        });
+    if (duplicate != plugins.end()) return 0;
+    plugins.push_back(FunctionExitPlugin{id, address, callback});
+    return 1;
+}
+
+extern "C" void psx_mod_function_exit(CPUState* cpu, uint32_t address) {
+    using namespace PSXRecompV4;
+    if (!cpu) return;
+    for (const FunctionExitPlugin& plugin : function_exit_plugins()) {
         if (plugin.address == address) plugin.callback(cpu, address);
     }
 }

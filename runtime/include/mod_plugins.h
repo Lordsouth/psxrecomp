@@ -27,6 +27,25 @@ int psx_mod_register_function_entry_plugin(
 void psx_mod_function_entry(struct CPUState* cpu, uint32_t address);
 
 /*
+ * Register a callback at a guest function's own `jr $ra`
+ * ([recompiler] mod_function_exit_funcs), using the same callback type as the
+ * entry hook. Fires after the body has run, before control returns to the
+ * caller.
+ *
+ * The companion to an entry hook, for state a plugin must perturb for exactly
+ * the duration of one call and then put back. Digimon World's backdrop tile
+ * streamer is the motivating case: it must SEE a camera shifted by the
+ * widescreen reveal so it streams the right tile column, but the shifted value
+ * must not survive the call, because everything else reads the same variable.
+ *
+ * Not a replacement for psx_mod_function_replace: this cannot suppress the
+ * body, only observe and fix up around it.
+ */
+int psx_mod_register_function_exit_plugin(
+    const char* id, uint32_t address, PSXModFunctionEntryCallback callback);
+void psx_mod_function_exit(struct CPUState* cpu, uint32_t address);
+
+/*
  * Native function replacement. A callback returns nonzero to CLAIM the call:
  * it has computed the result, written it to cpu->gpr[2] ($v0) and published
  * the return address (cpu->pc = cpu->gpr[31]), so the caller resumes exactly

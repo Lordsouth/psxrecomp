@@ -67,6 +67,14 @@ struct CodeGenConfig {
     // Only explicitly listed guest functions call the runtime dispatcher.
     std::set<uint32_t> mod_function_entry_funcs;
 
+    // Trusted game-mod EXIT hooks ([recompiler] mod_function_exit_funcs).
+    // Emits psx_mod_function_exit() at the function's own `jr $ra`, alongside
+    // the existing data-shard finalize. Exists because an entry hook alone
+    // cannot restore state it perturbed for the duration of a call: Digimon
+    // World's tile streamer must see a shifted CAMERA_X, and the value has to
+    // go back before anything else reads it.
+    std::set<uint32_t> mod_function_exit_funcs;
+
     // Trusted native function replacement ([recompiler]
     // mod_function_replace_funcs). Emits a CLAIMING hook at the top of the
     // body -- if the plugin handles the call it writes $v0, publishes $ra into
