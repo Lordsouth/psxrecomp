@@ -435,8 +435,33 @@ find "${STAGE}" -exec touch -c {} + 2>/dev/null || find "${STAGE}" -exec touch {
   cd "${STAGE}"
   if command -v zip >/dev/null 2>&1; then
     zip -r -q "${DIST}/${ZIP_NAME}" .
+  elif command -v python3 >/dev/null 2>&1 || command -v py >/dev/null 2>&1; then
+    # No zip binary (stock Git Bash / MSYS2 without the zip package). Building
+    # the archive by hand instead is what shipped 0.3.1 with no directory
+    # records in it -- the files and their paths were correct, but a player
+    # noticed the archive looked different from the release before, because
+    # `zip -r` records every directory and an ad-hoc writer records only files.
+    # Match `zip -r`: emit a directory entry for every directory, then files.
+    PY_BIN="python3"; command -v python3 >/dev/null 2>&1 || PY_BIN="py -3"
+    echo "note: no zip binary; writing ${ZIP_NAME} with ${PY_BIN}"
+    ${PY_BIN} - "${DIST}/${ZIP_NAME}" <<'PYZIP'
+import os, sys, zipfile
+out = sys.argv[1]
+if os.path.exists(out):
+    os.remove(out)
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
+    for dirpath, dirs, files in os.walk("."):
+        dirs.sort()
+        rel = os.path.relpath(dirpath, ".").replace(os.sep, "/")
+        if rel != ".":
+            z.writestr(zipfile.ZipInfo(rel + "/"), b"")
+        for fn in sorted(files):
+            full = os.path.join(dirpath, fn)
+            arc = os.path.relpath(full, ".").replace(os.sep, "/")
+            z.write(full, arc)
+PYZIP
   else
-    echo "error: zip not found" >&2
+    echo "error: no zip binary and no python to stand in for it" >&2
     exit 1
   fi
 )
