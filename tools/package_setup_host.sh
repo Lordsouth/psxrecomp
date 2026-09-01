@@ -282,10 +282,20 @@ if [[ ! -d "${ROOT}/recomp-ui" ]]; then
   exit 1
 fi
 
+# '/generated' MUST stay anchored. It exists to drop psxrecomp/generated/ (the
+# recompiled OpenBIOS C). As a BARE name it matches at every depth, and the
+# thing it also matched was rabbitizer's lib/rabbitizer/include/generated/ --
+# 21 headers that are checked-in SOURCE, not build output. Stripping them made
+# the package impossible to build: the player's very first compile dies on
+#   RabbitizerInstrId.h:16: fatal error: 'generated/InstrId_enum.h' file not found
+# and the launcher only shows "psxrecomp generate failed (exit 1)". That shipped
+# in 0.1.6, 0.2.0 and 0.3.0 before a player reported it; 0.1.0-0.1.5 were fine.
+# verify_setup_package.py is the gate that now catches it. Same warning applies
+# to any other bare name added here.
 copy_tree_filtered "${ROOT}/psxrecomp" "${STAGE}/psxrecomp" \
   --exclude '.git' \
   --exclude 'recompiler/build' \
-  --exclude 'generated' \
+  --exclude '/generated' \
   --exclude '__pycache__' \
   --exclude 'build' \
   --exclude 'build-*' \
@@ -306,6 +316,18 @@ copy_tree_filtered "${ROOT}/recomp-ui" "${STAGE}/recomp-ui" \
 # Never ship game generated C or common disc working trees.
 rm -rf "${STAGE}/generated" "${STAGE}/bpe" "${STAGE}/motk" "${STAGE}/disc"
 
+# Stray memory cards from the framework working tree. A developer who ran the
+# emulator from the psxrecomp checkout leaves card1.mcd/card2.mcd sitting at its
+# root, and they are 128 KB each of somebody's saves. This was a documented
+# by-hand step before every release, which is exactly the kind of step that
+# gets skipped -- both of the regressions this packager has shipped came from
+# a manual stage. Root only: runtime/tests/*.mcd are real test fixtures.
+for stray in "${STAGE}"/psxrecomp/*.mcd "${STAGE}"/psxrecomp/*.mcr; do
+  [ -e "${stray}" ] || continue
+  echo "purging stray memory card: ${stray#"${STAGE}"/}"
+  rm -f "${stray}"
+done
+
 # Never ship mod packages whose generated manifests mark themselves as
 # non-redistributable (they embed another work's bytes). --project-dir mods
 # sweeps in the whole working tree, so the purge happens here, every time,
@@ -314,13 +336,25 @@ if [ -d "${STAGE}/mods/packages" ]; then
   # Purge on ANY of several markers, not one exact phrase -- a generated
   # manifest that embeds another work's bytes must never be redistributed,
   # and a reworded header must not silently defeat the guard.
+  #
+  # Capture each grep into a variable rather than piping into `while`. Under
+  # this script's `set -euo pipefail`, `grep | while` aborts the WHOLE packager
+  # the moment a marker finds no match, because pipefail propagates grep's
+  # exit 1 and errexit acts on it. In practice at most one of the three markers
+  # matches, so the run died right after the first purge with no error message
+  # at all -- the packager simply stopped. `|| true` keeps a clean tree from
+  # being an error; the fail-closed post-condition below is what enforces the
+  # guarantee, and it is unaffected.
   for marker in "DO NOT COMMIT" "do-not-ship" "non-redistributable"; do
-    grep -rl "${marker}" "${STAGE}/mods/packages" 2>/dev/null | while IFS= read -r m; do
+    hits="$(grep -rl "${marker}" "${STAGE}/mods/packages" 2>/dev/null || true)"
+    [ -n "${hits}" ] || continue
+    while IFS= read -r m; do
+      [ -n "${m}" ] || continue
       pkg_dir="$(dirname "$(dirname "${m}")")"
       [ -d "${pkg_dir}" ] || continue
       echo "purging do-not-ship mod package: ${pkg_dir#"${STAGE}"/}"
       rm -rf "${pkg_dir}"
-    done
+    done <<< "${hits}"
   done
 
   # Positive post-condition: refuse to build a package that still contains a
