@@ -1497,6 +1497,76 @@ static void handle_progress_line(const char* line,
 }
 
 #if defined(_WIN32)
+/* ---- Keeping the generator's own words ------------------------------------
+ *
+ * The child's output was read line by line, fed to the progress bar and then
+ * DROPPED, so a failure surfaced as "psxrecomp generate failed (exit 1)" and
+ * nothing else. The one line that identifies the fault -- a missing header, a
+ * bad dump, a Python traceback -- flashed past in a console that closes with
+ * the process. Two players hit a generate failure that could not be diagnosed
+ * from their reports, and an earlier one only got anywhere because he happened
+ * to read the flashing window and paste it.
+ *
+ * Keep the tail in memory for the error message, and write the whole run to a
+ * log next to the game so it can be attached to a report.
+ */
+#define RC_TAIL_LINES 12
+#define RC_TAIL_LEN 400
+
+static char g_tail[RC_TAIL_LINES][RC_TAIL_LEN];
+static int g_tail_n;
+static int g_tail_head;
+static FILE* g_run_log;
+
+static void rc_log_open(const char* label) {
+    char path[1200];
+    if (g_run_log) { fclose(g_run_log); g_run_log = NULL; }
+    g_tail_n = 0;
+    g_tail_head = 0;
+    if (!g_project_root[0]) return;
+    if (!join_path(path, sizeof(path), g_project_root, "psxrecomp-build.log"))
+        return;
+    g_run_log = fopen(path, "w");
+    if (g_run_log) {
+        fprintf(g_run_log, "=== %s ===\n", label ? label : "run");
+        fflush(g_run_log);
+    }
+}
+
+static void rc_log_line(const char* line) {
+    if (g_run_log) {
+        fputs(line, g_run_log);
+        fputc('\n', g_run_log);
+        fflush(g_run_log);
+    }
+    if (!line[0]) return;
+    snprintf(g_tail[g_tail_head], RC_TAIL_LEN, "%s", line);
+    g_tail_head = (g_tail_head + 1) % RC_TAIL_LINES;
+    if (g_tail_n < RC_TAIL_LINES) g_tail_n++;
+}
+
+static void rc_log_close(void) {
+    if (g_run_log) { fclose(g_run_log); g_run_log = NULL; }
+}
+
+/* Append the most recent output to an error message, newest last. */
+static void rc_append_tail(char* err_msg, size_t err_cap) {
+    size_t len = strlen(err_msg);
+    int i;
+    if (g_tail_n <= 0) return;
+    snprintf(err_msg + len, err_cap - len, "\n\nLast output:");
+    for (i = 0; i < g_tail_n; ++i) {
+        int idx = (g_tail_head - g_tail_n + i + RC_TAIL_LINES) % RC_TAIL_LINES;
+        len = strlen(err_msg);
+        if (len + 4 >= err_cap) break;
+        snprintf(err_msg + len, err_cap - len, "\n  %s", g_tail[idx]);
+    }
+    len = strlen(err_msg);
+    if (len + 2 < err_cap)
+        snprintf(err_msg + len, err_cap - len,
+                 "\n\nFull log: psxrecomp-build.log next to the game.");
+}
+
 static int run_cli_win(const char* cmdline,
                        RecompLauncherCPrepareProgressFn on_progress,
                        void* progress_ctx, char* err_msg, size_t err_cap,
@@ -1544,6 +1614,7 @@ static int run_cli_win(const char* cmdline,
             if (c == '\r') continue;
             if (c == '\n') {
                 line[line_len] = '\0';
+                rc_log_line(line);
                 handle_progress_line(line, on_progress, progress_ctx);
                 line_len = 0;
                 continue;
@@ -1554,6 +1625,7 @@ static int run_cli_win(const char* cmdline,
     }
     if (line_len) {
         line[line_len] = '\0';
+        rc_log_line(line);
         handle_progress_line(line, on_progress, progress_ctx);
     }
     CloseHandle(rd);
@@ -1562,12 +1634,14 @@ static int run_cli_win(const char* cmdline,
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    if (code == 0) return 1;
+    if (code == 0) { rc_log_close(); return 1; }
     if (code == 3)
         snprintf(err_msg, err_cap, "Disc verification failed (wrong dump).");
     else
         snprintf(err_msg, err_cap, "%s failed (exit %lu).", fail_label,
                  (unsigned long)code);
+    rc_append_tail(err_msg, err_cap);
+    rc_log_close();
     return 0;
 }
 #else
@@ -1610,6 +1684,7 @@ static int run_cli_posix(char* const argv[],
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
             line[--n] = '\0';
+        rc_log_line(line);
         handle_progress_line(line, on_progress, progress_ctx);
     }
     fclose(out);
@@ -1620,11 +1695,13 @@ static int run_cli_posix(char* const argv[],
         return 0;
     }
     int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-    if (code == 0) return 1;
+    if (code == 0) { rc_log_close(); return 1; }
     if (code == 3)
         snprintf(err_msg, err_cap, "Disc verification failed (wrong dump).");
     else
         snprintf(err_msg, err_cap, "%s failed (exit %d).", fail_label, code);
+    rc_append_tail(err_msg, err_cap);
+    rc_log_close();
     return 0;
 }
 #endif
@@ -3349,6 +3426,7 @@ static int host_prepare_generate(const char* source_path, char* out_path,
                  "--disc \"%s\" --json-progress",
                  g_python, g_cli_path, g_project_root, g_game_toml, source_path);
     }
+    rc_log_open("psxrecomp generate");
     if (!run_cli_win(cmdline, on_progress, progress_ctx, err_msg, err_cap,
                      "psxrecomp generate"))
         return 0;
@@ -3370,6 +3448,7 @@ static int host_prepare_generate(const char* source_path, char* out_path,
     }
     argv[argc++] = "--json-progress";
     argv[argc] = NULL;
+    rc_log_open("psxrecomp generate");
     if (!run_cli_posix(argv, on_progress, progress_ctx, err_msg, err_cap,
                        "psxrecomp generate"))
         return 0;
@@ -3575,6 +3654,7 @@ static int host_rebuild_game_ex(const char* disc_path, int force_pgo,
     argv[argc++] = "--json-progress";
     argv[argc] = NULL;
 
+    rc_log_open("psxrecomp PGO optimize");
     if (!run_cli_posix(argv, on_progress, progress_ctx, err_msg, err_cap,
                        force_pgo ? "psxrecomp PGO optimize"
                                  : "psxrecomp rebuild"))
