@@ -89,6 +89,21 @@ int32_t psx_mod_widescreen_x_margin(void);
 int psx_mod_ws_squash_params(int32_t* num, int32_t* den);
 
 /*
+ * Per-side NATIVE-WIDE reveal in native game pixels, or 0 when native-wide is
+ * not presenting this frame.
+ *
+ * Distinct from psx_mod_widescreen_x_margin(), which is the CULL margin: that
+ * one is nonzero in squash mode too, it carries the cull guard on top of the
+ * reveal, and -- deliberately, so scene-load spawn lists are not baked to a 4:3
+ * frustum -- it stays nonzero on native-wide FMV and menu frames that are
+ * actually presented 4:3. A plugin that repositions geometry to match the
+ * PRESENTED frame must not use it: on those frames it would shift 2D by a
+ * reveal that is not being shown. This returns the exact offset the presented
+ * frame is actually widened by, and 0 whenever it is not.
+ */
+int32_t psx_mod_ws_native_wide_offset(void);
+
+/*
  * Read the committed value of one of this package's declared options, as the
  * player left it in the launcher (or the manifest default when untouched).
  * Writes a NUL-terminated string into `out` and returns 1; returns 0 with
