@@ -30,6 +30,11 @@ void     gpu_vblank_tick(void);        /* Toggle LCF, called at each simulated v
 
 /* Display presentation accessors (Phase 3). */
 const uint16_t* gpu_get_vram(void);    /* Pointer to 1024x512 16-bit VRAM */
+/* Plugin VRAM upload: lands like a completed CPU->VRAM transfer (CPU array,
+ * dirty rows, renderer mirror). Returns 0 without writing if the rectangle
+ * does not fit in 1024x512; never wraps. */
+int gpu_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                       const uint16_t* pixels);
 
 typedef struct {
     uint32_t display_x, display_y;     /* VRAM start of display area (GP1(05h)) */

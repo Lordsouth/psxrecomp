@@ -83,6 +83,24 @@ void psx_mod_write_word(uint32_t address, uint32_t value);
 void psx_mod_write_code_word(uint32_t address, uint32_t value);
 
 /*
+ * Write a rectangle of raw 16-bit halfwords into guest VRAM, exactly as a
+ * completed CPU->VRAM transfer would land them: the CPU-side array, dirty-row
+ * tracking and the renderer's mirror are all updated, and anything the game
+ * draws afterwards samples the new data. Returns 1, or 0 -- writing nothing --
+ * when the rectangle does not fit in 1024x512. It never wraps.
+ *
+ * For plugins that stream texture data the game never had a slot for. The
+ * motivating case is Digimon World's backdrop: the game streams a ring of FOUR
+ * 128-px tile columns, which cannot cover a 16:9 frame at every camera
+ * alignment, and the missing strip on the right has to come from somewhere.
+ * The guest offers no LoadImage a plugin can call -- a plugin cannot call guest
+ * code at all -- so the framework does the upload. It lands immediately,
+ * between two guest instructions.
+ */
+int psx_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                       const uint16_t* pixels);
+
+/*
  * Allocate opt-in enhancement memory from Expansion 1. Until the first
  * allocation, the region remains hardware-faithful open bus. The returned
  * KSEG0 address is accessible through normal generated guest loads.

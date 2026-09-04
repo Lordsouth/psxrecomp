@@ -44,6 +44,7 @@ extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t size,
                                                   uint32_t alignment);
 extern "C" int psx_ws_x_margin(void);
 extern "C" int ws_nw_extra(void);
+extern "C" int gpu_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const uint16_t* pixels);
 extern "C" void dirty_ram_mark_executable_range(uint32_t phys, uint32_t len);
 extern "C" int fntrace_is_game_started(void);
 
@@ -1318,6 +1319,11 @@ extern "C" int32_t psx_mod_ws_native_wide_offset(void) {
      * unless native-wide is ACTIVE (which folds in !gpu_ws_present_native_43),
      * so this is exactly the reveal the presented frame carries. */
     return (int32_t)(ws_nw_extra() / 2);
+}
+
+extern "C" int psx_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                                  const uint16_t* pixels) {
+    return gpu_mod_vram_write(x, y, w, h, pixels);
 }
 
 extern "C" int psx_mod_register_function_entry_plugin(

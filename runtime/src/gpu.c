@@ -5733,3 +5733,22 @@ int gpu_snapshot_read(const uint8_t *p, uint32_t len) {
 }
 uint16_t* gpu_get_vram_ptr(void){ return vram; }
 uint32_t  gpu_get_vram_bytes(void){ return (uint32_t)sizeof(vram); }
+
+/* Plugin-driven CPU->VRAM write (mod_plugins.h psx_mod_vram_write). The same
+ * three-way commit a completed GP0(A0h) transfer performs -- CPU array, dirty
+ * rows, renderer mirror -- minus the guest-only side channels (the depth24
+ * band note and text translation), which describe what the GAME uploaded.
+ * Rejects rather than wraps: a plugin that needs wrapping has its coordinates
+ * wrong, and a silent wrap would scribble over the far edge of VRAM. */
+int gpu_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                       const uint16_t* pixels) {
+    if (!pixels || w == 0u || h == 0u || x >= 1024u || y >= 512u ||
+        w > 1024u - x || h > 512u - y)
+        return 0;
+    for (uint32_t row = 0; row < h; row++)
+        memcpy(&vram[(y + row) * 1024u + x], pixels + (size_t)row * w,
+               (size_t)w * sizeof(uint16_t));
+    gpu_vram_dirty_mark_rect((int)x, (int)y, (int)w, (int)h);
+    gr_vram_transfer_in((int)x, (int)y, (int)w, (int)h, pixels);
+    return 1;
+}
