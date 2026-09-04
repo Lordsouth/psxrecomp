@@ -7,6 +7,8 @@
 
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>   /* getenv, strtol -- came in via windows.h on MSVC/MinGW,
+                       * so its absence only ever broke the Linux build */
 #include <string.h>
 #include <time.h>
 
@@ -173,8 +175,25 @@ static int      s_dump_armed = 1;
  * (host under load, a long compile in the background) alternates
  * wedge/healthy and writes one dump per stutter. That filled a 454 GB disk
  * with 1213 files in a single session. A diagnostic must not be able to
- * consume unbounded disk: cap per run, keeping the first (informative) few. */
-#define FREEZE_DUMP_MAX_PER_RUN 5
+ * consume unbounded disk. */
+
+/* OFF BY DEFAULT since 0.3.4, and the default is the whole point.
+ *
+ * Each dump is a full state snapshot -- ~109 MB on Digimon World -- and the
+ * wedge heuristic FALSE-POSITIVES on a title idling in its attract loop: a
+ * 24-minute soak produced five of them in the first two minutes while the
+ * game ran at a steady 60 fps and stayed fully responsive. Left at 5, an
+ * ordinary play session sheds half a gigabyte of diagnostics describing
+ * nothing, and it accumulates: 460 files and 24 GB were recovered from one
+ * developer machine, none of which recorded a real fault.
+ *
+ * A diagnostic that can fire when nothing is wrong and costs 100 MB a time
+ * has no business being on by default in a shipped game. The detection and
+ * the log line still run -- only the snapshot is suppressed -- so a genuine
+ * wedge is still reported, just without the payload. Set
+ * PSX_FREEZE_DUMP_MAX=5 (or any value up to 1000) to get the snapshots back
+ * when actually chasing a freeze. */
+#define FREEZE_DUMP_MAX_PER_RUN 0
 static int      s_dump_count = 0;
 
 /* Dump budget for this run. A 24-minute soak on Digimon World produced
@@ -182,8 +201,7 @@ static int      s_dump_count = 0;
  * frames advanced at a steady 60 fps and the game stayed fully
  * responsive. The heuristic fires on a title idling in its attract loop,
  * so a normal play session can shed half a gigabyte of diagnostics for
- * nothing. PSX_FREEZE_DUMP_MAX overrides the budget; 0 disables dumps
- * entirely, which is what a shipped launcher wants. */
+ * nothing. PSX_FREEZE_DUMP_MAX overrides the budget in either direction. */
 static int freeze_dump_budget(void) {
     static int cached = -1;
     if (cached >= 0) return cached;

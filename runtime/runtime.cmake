@@ -464,12 +464,21 @@ if(PSX_REWIND)
         message(STATUS "psxrecomp: rewind snap_ring (${RECOMP_RBENGINE_ROOT})")
     endif()
     if(NOT PSXRECOMP_HAS_RBENGINE_SNAP)
-        message(FATAL_ERROR
-            "psxrecomp: PSX_REWIND=ON exposes the Rewind launcher controls "
-            "but no retcomm-rbengine snap-ring backend was found.\n"
-            "  git submodule update --init lib/retcomm-rbengine\n"
+        # A WARNING, not an error. This was FATAL_ERROR, which stopped the
+        # build dead on any clone without the submodule -- players hit it on
+        # Linux and had to be told to pass -DPSX_REWIND=OFF to get a game at
+        # all. The thing it guarded against, exposing dead Rewind hotkeys, is
+        # already handled: recomp-ui keys off PSXRECOMP_HAS_RBENGINE_SNAP (see
+        # RECOMP_UI_PSX_HAS_REWIND below), which is FALSE here, so the controls
+        # hide themselves. Losing one optional feature should not cost someone
+        # the whole build.
+        message(WARNING
+            "psxrecomp: no retcomm-rbengine snap-ring backend found -- "
+            "building WITHOUT local rewind, and the launcher will hide its "
+            "Rewind controls. Nothing else is affected.\n"
+            "  To enable it: git submodule update --init lib/retcomm-rbengine\n"
             "  or -DRECOMP_RBENGINE_ROOT=/path/to/retcomm-rbengine\n"
-            "  or configure with -DPSX_REWIND=OFF to hide Rewind.")
+            "  To silence this warning: -DPSX_REWIND=OFF")
     endif()
 else()
     message(STATUS "psxrecomp: local rewind disabled (PSX_REWIND=OFF)")
