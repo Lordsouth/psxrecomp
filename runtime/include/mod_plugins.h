@@ -97,6 +97,21 @@ void psx_mod_write_code_word(uint32_t address, uint32_t value);
  * code at all -- so the framework does the upload. It lands immediately,
  * between two guest instructions.
  */
+/*
+ * Turn one GameShark-style cheat on or off by its name in cheats.txt.
+ *
+ * For a game that wants to offer its cheat list as launcher toggles instead
+ * of asking the player to edit a text file. The cheat FILE stays the source
+ * of truth for the codes themselves -- this only overrides the [x] state --
+ * so the two can never disagree about what a cheat actually writes.
+ *
+ * Safe to call from an activation callback, which runs long before the file
+ * is parsed: the choice is recorded by name and applied at load, and again on
+ * any reload. A name matching no cheat is reported on stdout rather than
+ * silently dropped, because that is what a manifest drifting from the file
+ * looks like.
+ */
+int psx_mod_cheat_set_enabled(const char* name, int enabled);
 int psx_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
                        const uint16_t* pixels);
 

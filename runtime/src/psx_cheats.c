@@ -58,6 +58,68 @@ static char s_path[512];
 static int  s_active;          /* any enabled cheat with codes */
 static int  s_loaded;
 
+/* Launcher overrides (psx_cheats_set_enabled).
+ *
+ * A mod package can offer the cheat list as launcher toggles, but the two
+ * arrive in the wrong order to just write s_enabled[]: plugin activation runs
+ * during startup, while the file is parsed lazily on the FIRST VBlank, so a
+ * direct write would be overwritten by the load a moment later. Overrides are
+ * therefore recorded by NAME and applied after every parse -- which also makes
+ * them survive a reload, and lets them be set before the file is even found.
+ *
+ * Deliberately by name rather than index: the file is the source of truth for
+ * the codes, and a name is the only handle that stays meaningful when someone
+ * edits, reorders or removes a cheat. A name that matches nothing is reported
+ * rather than ignored, because that is exactly what a drifted manifest looks
+ * like. */
+#define MAX_OVERRIDES 128
+static char s_ovr_name[MAX_OVERRIDES][MAX_NAME];
+static int  s_ovr_on[MAX_OVERRIDES];
+static int  s_ovr_count;
+
+static void recompute_active(void)
+{
+    s_active = 0;
+    for (int i = 0; i < s_code_count; i++) {
+        if (s_enabled[s_codes[i].cheat]) { s_active = 1; break; }
+    }
+}
+
+static void apply_overrides(void)
+{
+    for (int o = 0; o < s_ovr_count; o++) {
+        int matched = 0;
+        for (int i = 0; i < s_name_count; i++) {
+            if (strcmp(s_names[i], s_ovr_name[o]) == 0) {
+                s_enabled[i] = s_ovr_on[o] ? 1 : 0;
+                matched = 1;
+            }
+        }
+        if (!matched)
+            fprintf(stdout,
+                    "psxrecomp: cheats: launcher selected '%s', which is not "
+                    "in %s -- ignored\n", s_ovr_name[o], s_path);
+    }
+}
+
+int psx_cheats_set_enabled(const char *name, int enabled)
+{
+    if (!name || !*name) return 0;
+    for (int o = 0; o < s_ovr_count; o++) {
+        if (strcmp(s_ovr_name[o], name) == 0) {
+            s_ovr_on[o] = enabled ? 1 : 0;
+            if (s_loaded) { apply_overrides(); recompute_active(); }
+            return 1;
+        }
+    }
+    if (s_ovr_count >= MAX_OVERRIDES) return 0;
+    snprintf(s_ovr_name[s_ovr_count], MAX_NAME, "%s", name);
+    s_ovr_on[s_ovr_count] = enabled ? 1 : 0;
+    s_ovr_count++;
+    if (s_loaded) { apply_overrides(); recompute_active(); }
+    return 1;
+}
+
 static int ram_addr(uint32_t word, uint32_t *out)
 {
     uint32_t phys = word & 0x00FFFFFFu;
@@ -195,11 +257,13 @@ void psx_cheats_load(const char *path)
     }
     fclose(f);
 
+    /* Launcher selections win over the file, and are applied before the
+     * summary below so the printed list is what actually runs. */
+    apply_overrides();
+
     int on_count = 0;
     for (int i = 0; i < s_name_count; i++) if (s_enabled[i]) on_count++;
-    for (int i = 0; i < s_code_count; i++) {
-        if (s_enabled[s_codes[i].cheat]) { s_active = 1; break; }
-    }
+    recompute_active();
     fprintf(stdout,
             "psxrecomp: cheats: %s -- %d cheat(s), %d enabled, %d code line(s)"
             "%s\n",

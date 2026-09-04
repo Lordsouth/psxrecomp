@@ -26,6 +26,17 @@ void psx_cheats_on_vblank(void);
 /* Number of enabled cheats (0 when the engine is inactive). */
 int psx_cheats_enabled_count(void);
 
+/* Turn one cheat on or off BY NAME, overriding the [x] state in the file.
+ *
+ * For surfacing the cheat list as launcher toggles. Safe to call before the
+ * file has been read -- the choice is recorded and applied at load, and again
+ * on any reload -- which matters because plugin activation runs long before
+ * the first VBlank that triggers the parse. Returns 0 only if the override
+ * table is full or the name is empty; a name that matches no cheat is
+ * reported on stdout at load rather than failing here, since the file is the
+ * source of truth and a stale name is a manifest problem worth seeing. */
+int psx_cheats_set_enabled(const char *name, int enabled);
+
 #ifdef __cplusplus
 }
 #endif
