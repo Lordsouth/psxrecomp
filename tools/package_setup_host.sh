@@ -454,7 +454,13 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED, compresslevel=9) as z:
         dirs.sort()
         rel = os.path.relpath(dirpath, ".").replace(os.sep, "/")
         if rel != ".":
-            z.writestr(zipfile.ZipInfo(rel + "/"), b"")
+            # from_file, NOT ZipInfo(name): the bare constructor takes no
+            # filesystem stat, so date_time defaults to the DOS epoch and mode
+            # to 0. Every directory record came out stamped 1980-01-01 with no
+            # permission bits while the file records beside them were correct
+            # -- reported by a player against 0.3.3. from_file carries the real
+            # mtime and mode, and appends the trailing "/" itself.
+            z.writestr(zipfile.ZipInfo.from_file(dirpath, rel), b"")
         for fn in sorted(files):
             full = os.path.join(dirpath, fn)
             arc = os.path.relpath(full, ".").replace(os.sep, "/")
