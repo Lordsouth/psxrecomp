@@ -9,17 +9,21 @@
  * request-mode transfers are advanced from the guest cycle clock so games
  * which synchronize video decode through DMA busy/request state see realistic
  * backpressure.
- * Reference: nocash PSX specs, DuckStation src/core/dma.cpp
+ * Reference: PSX-SPX, page dmachannels (DMA Channels).
  */
 
 #include "dma.h"
 #include "cdrom.h"
 #include "crash_trace.h"
 #include "dirty_ram_interp.h"
+#include "dma_gpu_ll.h"
 #include "gpu.h"
 #include "mdec.h"
 #include "mod_memory.h"
 #include "overlay_capture.h"
+#include "psx_cycles.h"
+#include "psx_memory.h"
+#include "psx_cycle_freeze.h"
 #include "spu.h"
 #include "audio_trace.h"
 #include "event_ring.h"
@@ -27,7 +31,22 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
+#ifdef _WIN32
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
+#include "gpu_timeline.h"
 
+/* Word-aligned main-RAM offset of a DMA address (MADR / stepped cursor)
+ * through the live geometry: retail folds to 2 MiB exactly as the DMAC's
+ * 0x1FFFFC decode does; the opt-in 8 MB map addresses its unique high pages. */
+#define DMA_RAM_ADDR(a) (psx_ram_canonical_offset(a) & ~3u)
 /* Memory access — defined in memory.c */
 extern uint32_t psx_read_word(uint32_t addr);
 extern void     psx_write_word(uint32_t addr, uint32_t val);
@@ -61,6 +80,10 @@ typedef struct {
 
 static DMAAsyncChannel mdec_async[2];
 static DMAAsyncChannel cdrom_async;
+static DMAGPULinkedList gpu_linked_list;
+static DMAGpuOtStats gpu_ot_stats;
+static uint64_t gpu_ot_start_cycle;
+static uint32_t gpu_ot_polls_this_walk;
 
 /* ---- CD DMA transfer log ---- */
 /* Every forward CH3 DMA that lands below 0x1C0000 (game data region) records
@@ -200,6 +223,18 @@ static void trace_dma_reg_write(uint32_t addr, uint32_t val, uint32_t mask,
     e->pc = g_debug_last_store_pc;
 }
 
+static void gpu_ot_record_walk_stats(uint64_t cycles) {
+    gpu_ot_stats.nodes_last = gpu_linked_list.nodes_processed;
+    gpu_ot_stats.words_last = gpu_linked_list.total_words;
+    gpu_ot_stats.cycles_last = cycles;
+    if (gpu_ot_stats.nodes_last > gpu_ot_stats.nodes_max)
+        gpu_ot_stats.nodes_max = gpu_ot_stats.nodes_last;
+    if (gpu_ot_stats.words_last > gpu_ot_stats.words_max)
+        gpu_ot_stats.words_max = gpu_ot_stats.words_last;
+    if (gpu_ot_stats.cycles_last > gpu_ot_stats.cycles_max)
+        gpu_ot_stats.cycles_max = gpu_ot_stats.cycles_last;
+}
+
 /* ---- Helpers ---- */
 
 static void update_master_irq(void) {
@@ -238,7 +273,7 @@ static void start_cdrom_dma_capture(uint32_t requested_words) {
     memset(&cdrom_dma_active_entry, 0, sizeof(cdrom_dma_active_entry));
     cdrom_dma_active_entry.seq = cdrom_dma_history_seq++;
     cdrom_dma_active_entry.frame_start = (uint32_t)s_frame_count;
-    cdrom_dma_active_entry.start_addr = channels[3].madr & 0x1FFFFCu;
+    cdrom_dma_active_entry.start_addr = DMA_RAM_ADDR(channels[3].madr);
     cdrom_dma_active_entry.final_addr = cdrom_dma_active_entry.start_addr;
     cdrom_dma_active_entry.requested_words = requested_words;
     cdrom_dma_active_entry.bcr = channels[3].bcr;
@@ -285,7 +320,7 @@ static void finish_cdrom_dma_capture(uint32_t final_addr, uint8_t completed) {
     cdrom_debug_snapshot(&s);
 
     cdrom_dma_active_entry.frame_end = (uint32_t)s_frame_count;
-    cdrom_dma_active_entry.final_addr = final_addr & 0x1FFFFCu;
+    cdrom_dma_active_entry.final_addr = DMA_RAM_ADDR(final_addr);
     cdrom_dma_active_entry.dicr_end = dicr_read_value(dicr);
     cdrom_dma_active_entry.i_stat_end = i_stat;
     cdrom_dma_active_entry.sector_read_pos_end = s.sector_read_pos;
@@ -382,12 +417,28 @@ static void cancel_async_transfer(int ch) {
         mdec_async[ch].cycles_accum = 0;
     }
     if (ch == 3) {
-        finish_cdrom_dma_capture(channels[3].madr & 0x1FFFFCu, 0);
+        finish_cdrom_dma_capture(DMA_RAM_ADDR(channels[3].madr), 0);
         cdrom_async.active = 0;
         cdrom_async.debug_started = 0;
         cdrom_async.total_words = 0;
         cdrom_async.remaining_words = 0;
         cdrom_async.cycles_accum = 0;
+    }
+    if (ch == 2 && gpu_linked_list.active) {
+        uint64_t cycles = psx_cycle_count - gpu_ot_start_cycle;
+        gpu_ot_record_walk_stats(cycles);
+        DMAGpuOtCancel *c = &gpu_ot_stats.cancel_ring[
+            gpu_ot_stats.cancel_ring_count % DMA_GPU_OT_CANCEL_RING];
+        c->pc     = g_debug_last_store_pc;
+        c->chcr   = channels[2].chcr;
+        c->nodes  = gpu_linked_list.nodes_processed;
+        c->words  = gpu_linked_list.total_words;
+        c->cycles = cycles > UINT32_MAX ? UINT32_MAX : (uint32_t)cycles;
+        c->polls  = gpu_ot_polls_this_walk;
+        gpu_ot_stats.cancel_ring_count++;
+        gpu_ot_stats.cancels++;
+        gpu_ws_end_linked_list();
+        dma_gpu_ll_cancel(&gpu_linked_list);
     }
     if (ch >= 0 && ch < 7) {
         delayed_complete[ch].active = 0;
@@ -398,7 +449,9 @@ static void cancel_async_transfer(int ch) {
 
 static void schedule_delayed_complete(int ch, uint32_t total_words,
                                       uint32_t cycles_per_word) {
-    if (total_words == 0 || cycles_per_word == 0) {
+    /* Render passes run in frozen guest time: a delayed completion would
+     * never arrive, so finish now (the pass restores DMA state after). */
+    if (total_words == 0 || cycles_per_word == 0 || g_psx_render_pass_active) {
         complete_transfer(ch);
         return;
     }
@@ -437,9 +490,9 @@ static void start_async_mdec_transfer(int ch) {
     a->cycles_accum = 0;
 
     if (ch == 0) {
-        mdec_debug_dma_in_start(channels[0].madr & 0x1FFFFCu, a->remaining_words);
+        mdec_debug_dma_in_start(DMA_RAM_ADDR(channels[0].madr), a->remaining_words);
     } else {
-        mdec_debug_dma_out_start(channels[1].madr & 0x1FFFFCu, a->remaining_words);
+        mdec_debug_dma_out_start(DMA_RAM_ADDR(channels[1].madr), a->remaining_words);
     }
     a->debug_started = 1;
 }
@@ -463,14 +516,47 @@ static void start_async_cdrom_transfer(void) {
     a->total_words = transfer_word_count(3);
     a->remaining_words = a->total_words;
     a->cycles_accum = 0;
-    a->start_addr = channels[3].madr & 0x1FFFFCu;
+    a->start_addr = DMA_RAM_ADDR(channels[3].madr);
     start_cdrom_dma_capture(a->total_words);
 
     if (a->total_words == 0) {
-        finish_cdrom_dma_capture(channels[3].madr & 0x1FFFFCu, 1);
+        finish_cdrom_dma_capture(DMA_RAM_ADDR(channels[3].madr), 1);
         cancel_async_transfer(3);
         complete_transfer(3);
     }
+}
+
+int dma_host_cdrom_write(uint32_t dest, const uint8_t *src, uint32_t bytes, int lba) {
+    if ((dest & 3u) || (bytes & 3u) || (!src && bytes)) return 0;
+    const uint32_t addr = DMA_RAM_ADDR(dest);
+    const uint32_t live = psx_ram_live_bytes();
+    if (addr >= live || bytes > live - addr) return 0;
+    if (!bytes) return 1;
+    /* Same capture window as the real ch3 path: game data, not FMV buffers. */
+    const int capture = addr < 0x1C0000u || addr >= PSX_MAIN_RAM_RETAIL_BYTES;
+    const int saved_ch = g_dma_cur_ch;
+    const uint32_t saved_madr = g_dma_cur_madr, saved_bcr = g_dma_cur_bcr;
+    g_dma_exec_depth++;
+    g_dma_cur_ch = 3;
+    g_dma_cur_bcr = bytes / 4u;
+    if (capture) overlay_capture_before_dma(addr, bytes);
+    for (uint32_t i = 0; i < bytes; i += 4u) {
+        uint32_t word;
+        memcpy(&word, src + i, 4);
+        g_dma_cur_madr = addr + i;
+        psx_write_word(addr + i, word);
+    }
+    dirty_ram_mark_executable_range(addr, bytes);
+    if (capture) {
+        if (lba >= 0) cd_dma_log_push(lba, addr, bytes);
+        extern uint8_t *memory_get_ram_ptr(void);
+        overlay_capture_on_dma(addr, bytes, memory_get_ram_ptr() + addr);
+    }
+    g_dma_cur_ch = saved_ch;
+    g_dma_cur_madr = saved_madr;
+    g_dma_cur_bcr = saved_bcr;
+    g_dma_exec_depth--;
+    return 1;
 }
 
 static void finish_async_cdrom_transfer(uint32_t final_addr) {
@@ -482,12 +568,13 @@ static void finish_async_cdrom_transfer(uint32_t final_addr) {
 
     /* Log and capture game-data transfers only.
      * Transfers to 0x1C0000+ are FMV/streaming buffers; skip them. */
-    if (!step && size > 0 && load_start < 0x1C0000u) {
-        /* The DMA word loop wraps inside the 2 MB RAM mask; the capture
+    if (!step && size > 0 &&
+        (load_start < 0x1C0000u || load_start >= PSX_MAIN_RAM_RETAIL_BYTES)) {
+        /* The DMA word loop wraps inside the live RAM mask; the capture
          * path below takes a flat ram+offset span and must not follow the
          * wrap past the end of host RAM. */
-        if (size > 0x200000u - load_start)
-            size = 0x200000u - load_start;
+        if (size > psx_ram_live_bytes() - load_start)
+            size = psx_ram_live_bytes() - load_start;
         int lba = cdrom_get_setloc_lba();
         if (lba >= 0) cd_dma_log_push(lba, load_start, size);
 
@@ -517,7 +604,7 @@ static void advance_mdec_channel(int ch, uint32_t cycles) {
 
     if ((ch == 0 && direction == 0) || (ch == 1 && direction != 0)) {
         uint32_t words = a->total_words;
-        uint32_t addr = channels[ch].madr & 0x1FFFFCu;
+        uint32_t addr = DMA_RAM_ADDR(channels[ch].madr);
         finish_async_mdec_transfer(ch, addr, words);
         return;
     }
@@ -537,7 +624,7 @@ static void advance_mdec_channel(int ch, uint32_t cycles) {
     uint32_t words_budget = a->cycles_accum / cycles_per_word;
     if (words_budget == 0) return;
 
-    uint32_t addr = channels[ch].madr & 0x1FFFFCu;
+    uint32_t addr = DMA_RAM_ADDR(channels[ch].madr);
     uint32_t moved = 0;
     /* ch1 (MDEC→RAM) writes guest RAM here in a deferred step; mark it as
      * DMA-sourced so write-provenance tags these writes with ch1 + the kick PC
@@ -558,13 +645,13 @@ static void advance_mdec_channel(int ch, uint32_t cycles) {
             if (!mdec_dma_write_ready()) break;
             uint32_t n = a->remaining_words < words_budget
                        ? a->remaining_words : words_budget;
-            uint32_t max_by_ram = (0x200000u - addr) / 4u;
+            uint32_t max_by_ram = (psx_ram_live_bytes() - addr) / 4u;
             if (max_by_ram == 0) break;
             if (n > max_by_ram) n = max_by_ram;
             uint32_t got =
                 mdec_dma_write_words((const uint32_t *)(ram + addr), n);
             if (got == 0) break;
-            addr = (addr + got * 4u) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + got * 4u));
             a->remaining_words -= got;
             words_budget -= got;
             moved += got;
@@ -580,7 +667,7 @@ static void advance_mdec_channel(int ch, uint32_t cycles) {
                 psx_write_word(addr, mdec_dma_read_word());
             }
 
-            addr = (addr + addr_step) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + addr_step));
             a->remaining_words--;
             words_budget--;
             moved++;
@@ -603,26 +690,26 @@ static void execute_ch0_mdec_in(void) {
     uint32_t direction = chcr & 1;           /* 1=from RAM to MDEC */
     uint32_t step = (chcr >> 1) & 1;
     uint32_t total_words = transfer_word_count(0);
-    uint32_t addr = channels[0].madr & 0x1FFFFCu;
+    uint32_t addr = DMA_RAM_ADDR(channels[0].madr);
     int32_t addr_step = step ? -4 : 4;
 
     if (direction != 0) {
         mdec_debug_dma_in_start(addr, total_words);
         if (addr_step == 4 && total_words > 0 &&
-            addr + total_words * 4u <= 0x200000u) {
+            addr + total_words * 4u <= psx_ram_live_bytes()) {
             extern uint8_t *memory_get_ram_ptr(void);
             uint32_t got = mdec_dma_write_words(
                 (const uint32_t *)(memory_get_ram_ptr() + addr), total_words);
-            addr = (addr + got * 4u) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + got * 4u));
             /* If the FIFO stalled mid-burst, finish any remainder word-wise. */
             for (uint32_t i = got; i < total_words; i++) {
                 mdec_dma_write_word(psx_read_word(addr));
-                addr = (addr + 4u) & 0x1FFFFCu;
+                addr = DMA_RAM_ADDR((addr + 4u));
             }
         } else {
             for (uint32_t i = 0; i < total_words; i++) {
                 mdec_dma_write_word(psx_read_word(addr));
-                addr = (addr + addr_step) & 0x1FFFFCu;
+                addr = DMA_RAM_ADDR((addr + addr_step));
             }
         }
         mdec_debug_dma_in_end(addr, total_words);
@@ -637,20 +724,171 @@ static void execute_ch1_mdec_out(void) {
     uint32_t direction = chcr & 1;           /* 0=from MDEC to RAM */
     uint32_t step = (chcr >> 1) & 1;
     uint32_t total_words = transfer_word_count(1);
-    uint32_t addr = channels[1].madr & 0x1FFFFCu;
+    uint32_t addr = DMA_RAM_ADDR(channels[1].madr);
     int32_t addr_step = step ? -4 : 4;
 
     if (direction == 0) {
         mdec_debug_dma_out_start(addr, total_words);
         for (uint32_t i = 0; i < total_words; i++) {
             psx_write_word(addr, mdec_dma_read_word());
-            addr = (addr + addr_step) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + addr_step));
         }
         mdec_debug_dma_out_end(addr, total_words);
         channels[1].madr = addr;
     }
 
     complete_transfer(1);
+}
+
+static uint32_t gpu_ll_resolve_address(void *opaque, uint32_t address) {
+    (void)opaque;
+    return psx_mod_gpu_dma_resolve_address(address);
+}
+
+static uint32_t gpu_ll_read_word(void *opaque, uint32_t address) {
+    (void)opaque;
+    return psx_read_word(address);
+}
+
+static void gpu_ll_observe_header(void *opaque, uint32_t addr,
+                                  uint32_t header) {
+    (void)opaque;
+    gpu_ws_validate_linked_list_header(addr, header);
+}
+
+static int gpu_ll_begin_node(void *opaque, uint32_t addr, uint32_t num_words) {
+    (void)opaque;
+
+    gpu_ws_validate_linked_list_node(addr, num_words);
+    gpu_set_gp0_linked_list_node(addr, num_words);
+    return 1;
+}
+
+static void gpu_ll_emit_word(void *opaque, uint32_t address, uint32_t word) {
+    (void)opaque;
+    gpu_set_gp0_source(address);
+    gpu_write_gp0(word);
+}
+
+static void gpu_ll_complete(void *opaque, int hit_limit) {
+    (void)opaque;
+    gpu_ot_stats.completes++;
+    gpu_ot_record_walk_stats(psx_cycle_count - gpu_ot_start_cycle);
+    gpu_timeline_note(GTL_LL_END, gpu_linked_list.nodes_processed,
+                      gpu_linked_list.total_words);
+    channels[2].madr = hit_limit ? gpu_linked_list.current_addr
+                                 : 0x00FFFFFFu;
+    gpu_ws_end_linked_list();
+    complete_transfer(2);
+}
+
+static const DMAGPULinkedListOps gpu_ll_ops = {
+    gpu_ll_resolve_address,
+    gpu_ll_read_word,
+    gpu_ll_observe_header,
+    gpu_ll_begin_node,
+    gpu_ll_emit_word,
+    gpu_ll_complete
+};
+
+static void start_async_gpu_linked_list(void) {
+    if (gpu_linked_list.active) {
+        gpu_ot_stats.starts_dropped++;
+        return;
+    }
+    uint32_t start_addr = psx_mod_gpu_dma_resolve_address(channels[2].madr);
+    gpu_ws_begin_linked_list();
+    /* This scan only prepares optional widescreen grouping. It does not send
+     * packets to GP0. The event-driven walker below performs every guest-visible
+     * header and payload read at its consumption boundary. */
+    gpu_ws_prepass_linked_list(start_addr);
+    dma_gpu_ll_start(&gpu_linked_list, start_addr, 0x40000u);
+    gpu_timeline_note(GTL_LL_START, start_addr, 0);
+    event_ring_record_aux(EV_DMA_SCHED, 2u, channels[2].chcr);
+    gpu_ot_stats.starts++;
+    gpu_ot_start_cycle = psx_cycle_count;
+    gpu_ot_polls_this_walk = 0;
+}
+
+/* PSX-SPX "CPU Operation during DMA": DMA outruns CPU memory access, and a CPU
+ * read of RAM or I/O waits while DMA moves data. So the kicking store of a GPU
+ * linked-list transfer returns only when the walk ends: guest code that
+ * rewrites a packet right after DrawOTag (the retail SCPH1001 intro re-copies
+ * its text packets from a template, clearing the link) cannot reach it before
+ * the walk does. A cyclic list still ends at the walker's node limit. The hold
+ * also ends if an advance moves no list word. */
+/* Always-on hold observability (dma_hold_stats / dma_hold_ring). Every held
+ * kick is recorded with its guest cost, its host wall time and whether it was
+ * made from inside an exception handler: a kick from an IRQ callback runs the
+ * whole walk (and the GPU work it feeds) with in_exception set, which is what
+ * the phase profiler's exc_share then measures. */
+extern int psx_get_in_exception(void);
+static DMAGpuHoldEntry s_hold_ring[DMA_GPU_HOLD_RING_CAP];
+static DMAGpuHoldStats s_hold_stats;
+
+static uint64_t hold_host_ticks(void) {
+#ifdef _WIN32
+    LARGE_INTEGER c; QueryPerformanceCounter(&c); return (uint64_t)c.QuadPart;
+#else
+    struct timespec ts; timespec_get(&ts, TIME_UTC);   /* C11; diagnostics only */
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+static uint64_t hold_host_ticks_per_sec(void) {
+#ifdef _WIN32
+    LARGE_INTEGER f; QueryPerformanceFrequency(&f); return (uint64_t)f.QuadPart;
+#else
+    return 1000000000ull;
+#endif
+}
+
+static void hold_cpu_for_gpu_linked_list(void) {
+    if (psx_in_device_service || g_ls_replay_active || g_psx_guest_time_frozen)
+        return;
+    const uint64_t cyc0 = psx_cycle_count;
+    const uint64_t host0 = hold_host_ticks();
+    const uint32_t words0 = gpu_linked_list.total_words;
+    uint32_t steps = 0;
+    while (gpu_linked_list.active && ((channels[2].chcr >> 24) & 1u) &&
+           channel_enabled(2)) {
+        const uint32_t moved = gpu_linked_list.total_words;
+        psx_advance_cycles(dma_gpu_ll_cycles_to_event(&gpu_linked_list));
+        psx_devices_service_to_now();
+        steps++;
+        if (gpu_linked_list.active && gpu_linked_list.total_words == moved) break;
+    }
+    const uint64_t host_us = (hold_host_ticks() - host0) * 1000000ull /
+                             hold_host_ticks_per_sec();
+    const int in_exc = psx_get_in_exception() != 0;
+    DMAGpuHoldEntry *e = &s_hold_ring[s_hold_stats.count & (DMA_GPU_HOLD_RING_CAP - 1u)];
+    e->seq = s_hold_stats.count;
+    e->cycle = cyc0;
+    e->held_cycles = (uint32_t)(psx_cycle_count - cyc0);
+    e->words = gpu_linked_list.total_words - words0;
+    e->steps = steps;
+    e->host_us = (uint32_t)(host_us > 0xFFFFFFFFull ? 0xFFFFFFFFull : host_us);
+    e->frame = (uint32_t)s_frame_count;
+    e->kick_pc = g_debug_last_store_pc;
+    e->madr = channels[2].madr;
+    e->in_exception = (uint8_t)in_exc;
+    e->still_active = (uint8_t)(gpu_linked_list.active != 0);
+    s_hold_stats.count++;
+    s_hold_stats.held_cycles += e->held_cycles;
+    s_hold_stats.host_us += host_us;
+    s_hold_stats.words += e->words;
+    s_hold_stats.steps += steps;
+    if (in_exc) {
+        s_hold_stats.exc_count++;
+        s_hold_stats.exc_held_cycles += e->held_cycles;
+        s_hold_stats.exc_host_us += host_us;
+    }
+}
+
+void dma_debug_get_gpu_hold(DMAGpuHoldStats *out_stats,
+                            const DMAGpuHoldEntry **out_ring) {
+    if (out_stats) *out_stats = s_hold_stats;
+    if (out_ring) *out_ring = s_hold_ring;
 }
 
 static uint32_t execute_ch2_gpu(void) {
@@ -667,12 +905,12 @@ static uint32_t execute_ch2_gpu(void) {
             uint32_t block_size = channels[2].bcr & 0xFFFF;
             uint32_t block_count = (channels[2].bcr >> 16) & 0xFFFF;
             uint32_t total_words = block_size * block_count;
-            uint32_t addr = channels[2].madr & 0x1FFFFCu;
+            uint32_t addr = DMA_RAM_ADDR(channels[2].madr);
             int32_t  addr_step = step ? -4 : 4;
             for (uint32_t i = 0; i < total_words; i++) {
                 uint32_t pixel_data = gpu_read_gpuread();
                 psx_write_word(addr, pixel_data);
-                addr = (addr + addr_step) & 0x1FFFFCu;
+                addr = DMA_RAM_ADDR((addr + addr_step));
             }
             channels[2].madr = addr;
             actual_words = total_words;
@@ -686,134 +924,33 @@ static uint32_t execute_ch2_gpu(void) {
         uint32_t block_size = channels[2].bcr & 0xFFFF;
         uint32_t block_count = (channels[2].bcr >> 16) & 0xFFFF;
         uint32_t total_words = block_size * block_count;
-        uint32_t addr = channels[2].madr & 0x1FFFFCu; /* mask to RAM, word-aligned */
+        uint32_t addr = DMA_RAM_ADDR(channels[2].madr); /* mask to RAM, word-aligned */
         int32_t  addr_step = step ? -4 : 4;
 
         for (uint32_t i = 0; i < total_words; i++) {
             uint32_t word = psx_read_word(addr);
             gpu_set_gp0_source(addr);
             gpu_write_gp0(word);
-            addr = (addr + addr_step) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + addr_step));
         }
         channels[2].madr = addr;
         actual_words = total_words;
     } else if (sync_mode == 2) {
-        /* Linked-list mode: follow ordering table in RAM.
-         * Each node: bits 24-31 = number of words following header,
-         *            bits 0-23  = next node address (0xFFFFFF = end).
-         * The words following the header are sent to GP0.
-         *
-         * PSX_ND_SIB_FLAP_LAST=1 (opt-in): skip additive PolyGT3 (GP0 0x36)
-         * whose signed 11-bit SX max is >= 280 AND whose OT rank is in the ND
-         * digit-rain band (~1832). Was a flap-overpaint workaround; after the
-         * AVSZ3 MAC0 fix it shreds the crate glow fountain — leave unset/0.
-         *
-         * OT-rank gate is mandatory: the same SX filter matches menu/char-select
-         * 0x36 (e.g. ot~1066) and would strip Crash face/trophy semis. Rank is
-         * the empty-node count used by gpu_set_gp0_linked_list_node.
-         *
-         * SX must be parsed as signed 11-bit (gpu.c parse_vertex). Legacy alias:
-         * PSX_ND_OT_OPAQUE_LAST. */
-        static int s_nd_flap_last = -1;
-        if (s_nd_flap_last < 0) {
-            const char *e = getenv("PSX_ND_SIB_FLAP_LAST");
-            if (!e || !*e)
-                e = getenv("PSX_ND_OT_OPAQUE_LAST");
-            s_nd_flap_last = (e && *e && *e != '0') ? 1 : 0;
-            if (s_nd_flap_last)
-                fprintf(stdout, "psxrecomp: PSX_ND_SIB_FLAP_LAST enabled\n");
-        }
-
-        gpu_ws_begin_linked_list();
-        uint32_t start_addr =
-            psx_mod_gpu_dma_resolve_address(channels[2].madr);
-        gpu_ws_prepass_linked_list(start_addr);
-        const uint32_t MAX_NODES = 0x40000; /* prevent infinite loops */
-        uint32_t last_addr = start_addr;
-        int hit_limit = 0;
-        /* Mirror gpu.c empty-node OT rank (0 after first empty header). */
-        uint32_t ot_rank = 0xffffffffu;
-
-        uint32_t addr = start_addr;
-        uint32_t safety = 0;
-        for (;;) {
-            if (safety++ > MAX_NODES) {
-                hit_limit = 1;
-                last_addr = addr;
-                break;
-            }
-
-            uint32_t header = psx_read_word(addr);
-            uint32_t num_words = (header >> 24) & 0xFF;
-            uint32_t word_addr =
-                psx_mod_gpu_dma_resolve_address(addr + 4u);
-
-            if (num_words == 0u)
-                ot_rank = (ot_rank == 0xffffffffu) ? 0u : (ot_rank + 1u);
-
-            int emit = 1;
-            if (s_nd_flap_last && num_words >= 6u &&
-                ot_rank >= 1600u && ot_rank < 2100u) {
-                uint32_t cmd = psx_read_word(word_addr);
-                uint32_t op = (cmd >> 24) & 0xFFu;
-                if (op == 0x36u) {
-                    /* Match gpu.c parse_vertex: signed 11-bit SX. Digit-rain
-                     * packets often stash junk in the high bits of the XY word;
-                     * int16 SX mis-classifies them. Skip glow whose s11 bbox
-                     * reaches the sibling right-flap band (sx_max >= 280). */
-                    int32_t sx_max = -0x8000;
-                    for (uint32_t vi = 1; vi <= 5; vi += 2) {
-                        uint32_t xy = psx_read_word(
-                            psx_mod_gpu_dma_resolve_address(word_addr +
-                                                            vi * 4u));
-                        int32_t sx = (int32_t)(xy & 0x7FFu);
-                        if (sx & 0x400)
-                            sx -= 0x800;
-                        if (sx > sx_max)
-                            sx_max = sx;
-                    }
-                    if (sx_max >= 280)
-                        emit = 0;
-                }
-            }
-
-            if (emit) {
-                gpu_set_gp0_linked_list_node(addr, num_words);
-                actual_words += 1u;
-                for (uint32_t i = 0; i < num_words; i++) {
-                    uint32_t word = psx_read_word(word_addr);
-                    gpu_set_gp0_source(word_addr);
-                    gpu_write_gp0(word);
-                    word_addr =
-                        psx_mod_gpu_dma_resolve_address(word_addr + 4u);
-                }
-                actual_words += num_words;
-            }
-
-            uint32_t next = header & 0xFFFFFFu;
-            if (next == 0xFFFFFFu) {
-                last_addr = 0x00FFFFFFu;
-                break;
-            }
-            addr = psx_mod_gpu_dma_resolve_address(next);
-            last_addr = addr;
-        }
-        (void)hit_limit;
-
-        channels[2].madr = last_addr;
-        gpu_ws_end_linked_list();
+        /* Linked-list mode is started by try_execute() and advanced from the
+         * guest cycle clock. It must never be drained synchronously here. */
+        return 0;
     } else {
         /* Burst mode (sync_mode == 0) */
         uint32_t word_count = channels[2].bcr & 0xFFFF;
         if (word_count == 0) word_count = 0x10000; /* 0 means 0x10000 */
-        uint32_t addr = channels[2].madr & 0x1FFFFCu;
+        uint32_t addr = DMA_RAM_ADDR(channels[2].madr);
         int32_t  addr_step = step ? -4 : 4;
 
         for (uint32_t i = 0; i < word_count; i++) {
             uint32_t word = psx_read_word(addr);
             gpu_set_gp0_source(addr);
             gpu_write_gp0(word);
-            addr = (addr + addr_step) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + addr_step));
         }
         channels[2].madr = addr;
         actual_words = word_count;
@@ -843,18 +980,18 @@ static uint32_t execute_ch4_spu(void) {
     uint32_t direction = chcr & 1;           /* 1=from RAM to SPU, 0=SPU to RAM */
     uint32_t step = (chcr >> 1) & 1;
     uint32_t total_words = transfer_word_count(4);
-    uint32_t addr = channels[4].madr & 0x1FFFFCu;
+    uint32_t addr = DMA_RAM_ADDR(channels[4].madr);
     int32_t addr_step = step ? -4 : 4;
 
     if (direction != 0) {
         for (uint32_t i = 0; i < total_words; i++) {
             spu_dma_write(psx_read_word(addr));
-            addr = (addr + addr_step) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + addr_step));
         }
         /* One aggregated event per SPU-bound transfer (per-word would flood
          * the ring: a full sound-bank upload is ~128k words). */
         audio_trace_event(AUDIO_EV_DMA_WRITE, total_words,
-                          channels[4].madr & 0x1FFFFCu);
+                          DMA_RAM_ADDR(channels[4].madr));
     } else {
         /* SPU RAM -> CPU RAM. This direction previously zero-filled the
          * destination, which is not a transfer at all: SPU RAM is readable
@@ -865,10 +1002,10 @@ static uint32_t execute_ch4_spu(void) {
          * fell back to a cold-boot path. */
         for (uint32_t i = 0; i < total_words; i++) {
             psx_write_word(addr, spu_dma_read());
-            addr = (addr + addr_step) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + addr_step));
         }
         audio_trace_event(AUDIO_EV_DMA_READ, total_words,
-                          channels[4].madr & 0x1FFFFCu);
+                          DMA_RAM_ADDR(channels[4].madr));
     }
 
     channels[4].madr = addr;
@@ -882,7 +1019,7 @@ static void execute_ch6_otc(void) {
      * BCR bits 0-15 = number of entries. */
     uint32_t num_entries = channels[6].bcr & 0xFFFF;
     if (num_entries == 0) num_entries = 0x10000;
-    uint32_t addr = channels[6].madr & 0x1FFFFCu;
+    uint32_t addr = DMA_RAM_ADDR(channels[6].madr);
 
     for (uint32_t i = 0; i < num_entries; i++) {
         uint32_t val;
@@ -894,7 +1031,7 @@ static void execute_ch6_otc(void) {
             val = (addr - 4) & 0x00FFFFFFu;
         }
         psx_write_word(addr, val);
-        addr = (addr - 4) & 0x1FFFFCu;
+        addr = DMA_RAM_ADDR((addr - 4));
     }
 
     complete_transfer(6);
@@ -910,20 +1047,20 @@ static void execute_ch5_pio(void) {
     uint32_t direction = chcr & 1u;
     uint32_t step = (chcr >> 1) & 1u;
     uint32_t total_words = transfer_word_count(5);
-    uint32_t addr = channels[5].madr & 0x1FFFFCu;
+    uint32_t addr = DMA_RAM_ADDR(channels[5].madr);
     int32_t addr_step = step ? -4 : 4;
 
     if (direction == 1) {
         /* from RAM to device: just read and discard */
         for (uint32_t i = 0; i < total_words; i++) {
             (void)psx_read_word(addr);
-            addr = (addr + addr_step) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + addr_step));
         }
     } else {
         /* to RAM from device: write zeros (device not emulated) */
         for (uint32_t i = 0; i < total_words; i++) {
             psx_write_word(addr, 0);
-            addr = (addr + addr_step) & 0x1FFFFCu;
+            addr = DMA_RAM_ADDR((addr + addr_step));
         }
     }
     channels[5].madr = addr;
@@ -959,8 +1096,21 @@ static void try_execute(int ch) {
             start_async_mdec_transfer(1);
             break;
         case 2:
-            schedule_delayed_complete(2, execute_ch2_gpu(),
-                                      DMA_GPU_CYCLES_PER_WORD);
+            if ((channels[2].chcr & 1u) != 0u &&
+                ((channels[2].chcr >> 9) & 3u) == 2u) {
+                start_async_gpu_linked_list();
+                /* Render pass: devices never advance in frozen time, so walk
+                 * the whole list now. The walk is the same event-driven code,
+                 * only with an unlimited budget; completion flags and the IRQ
+                 * latch it raises are rolled back with the pass. */
+                while (g_psx_render_pass_active && gpu_linked_list.active)
+                    dma_gpu_ll_advance(&gpu_linked_list, UINT32_MAX,
+                                       &gpu_ll_ops, NULL);
+                hold_cpu_for_gpu_linked_list();
+            } else {
+                schedule_delayed_complete(2, execute_ch2_gpu(),
+                                          DMA_GPU_CYCLES_PER_WORD);
+            }
             break;
         case 3:
             execute_ch3_cdrom();
@@ -991,6 +1141,8 @@ static void try_execute(int ch) {
 /* ---- Public interface ---- */
 
 uint32_t dma_get_dicr(void) { return dicr_read_value(dicr); }
+/* A GPU linked-list walk is in flight (render passes refuse to start then). */
+int dma_gpu_linked_list_active(void) { return gpu_linked_list.active != 0; }
 uint32_t dma_get_dpcr(void) { return dpcr; }
 int dma_cdrom_transfer_active(void) {
     return cdrom_async.active &&
@@ -1016,6 +1168,10 @@ uint32_t dma_cycles_to_irq(uint32_t i_mask) {
         uint32_t est = a->remaining_words > a->cycles_accum
                          ? (a->remaining_words - a->cycles_accum) : 0u;
         if (est < best) best = est;
+    }
+    if (gpu_linked_list.active) {
+        uint32_t d = dma_gpu_ll_cycles_to_event(&gpu_linked_list);
+        if (d < best) best = d;
     }
     for (int ch = 0; ch < 7; ch++) {
         if (delayed_complete[ch].active && delayed_complete[ch].cycles_remaining < best)
@@ -1063,6 +1219,12 @@ uint32_t dma_cycles_to_internal_event(void) {
         }
     }
 
+    if (gpu_linked_list.active && ((channels[2].chcr >> 24) & 1u) &&
+        channel_enabled(2)) {
+        uint32_t d = dma_gpu_ll_cycles_to_event(&gpu_linked_list);
+        if (d < best) best = d;
+    }
+
     for (int ch = 0; ch < 7; ch++) {
         if (delayed_complete[ch].active &&
             delayed_complete[ch].cycles_remaining < best)
@@ -1086,6 +1248,10 @@ uint32_t dma_cycles_to_deliverable_irq(uint32_t i_mask) {
                          ? (a->remaining_words - a->cycles_accum) : 0u;
         if (est < best) best = est;
     }
+    if (channel_irq_flag_armed(2) && gpu_linked_list.active) {
+        uint32_t d = dma_gpu_ll_cycles_to_event(&gpu_linked_list);
+        if (d < best) best = d;
+    }
     for (int ch = 0; ch < 7; ch++) {
         if (channel_irq_flag_armed(ch) && delayed_complete[ch].active &&
             delayed_complete[ch].cycles_remaining < best)
@@ -1099,6 +1265,14 @@ void dma_advance(uint32_t cycles) {
     g_dma_exec_depth++;   /* async to-RAM DMA writes below run through psx_write_word */
     advance_mdec_channel(0, cycles);
     advance_mdec_channel(1, cycles);
+    if (gpu_linked_list.active && ((channels[2].chcr >> 24) & 1u) &&
+        channel_enabled(2)) {
+        g_dma_cur_ch = 2;
+        g_dma_cur_madr = gpu_linked_list.current_addr;
+        g_dma_cur_bcr = channels[2].bcr;
+        g_dma_initiator_pc = s_dma_ch_initiator_pc[2];
+        dma_gpu_ll_advance(&gpu_linked_list, cycles, &gpu_ll_ops, NULL);
+    }
     DMAAsyncChannel *a = &cdrom_async;
     if (dma_cdrom_transfer_active()) {
         uint32_t chcr = channels[3].chcr;
@@ -1117,7 +1291,7 @@ void dma_advance(uint32_t cycles) {
             }
 
             uint32_t words_budget = a->cycles_accum / DMA_CDROM_CYCLES_PER_WORD;
-            uint32_t addr = channels[3].madr & 0x1FFFFCu;
+            uint32_t addr = DMA_RAM_ADDR(channels[3].madr);
             uint32_t moved = 0;
             g_dma_cur_ch = 3; g_dma_cur_bcr = channels[3].bcr;
             g_dma_initiator_pc = s_dma_ch_initiator_pc[3];  /* deferred: restore kick PC */
@@ -1126,9 +1300,10 @@ void dma_advance(uint32_t cycles) {
              * word. Scheduling-time capture was too early because guest code
              * can continue executing while the CD device is not ready. */
             if (a->remaining_words == a->total_words && words_budget > 0 &&
-                addr < 0x1C0000u) {
+                (addr < 0x1C0000u || addr >= PSX_MAIN_RAM_RETAIL_BYTES)) {
                 uint32_t bytes = a->total_words * 4u;
-                if (bytes > 0x200000u - addr) bytes = 0x200000u - addr;
+                if (bytes > psx_ram_live_bytes() - addr)
+                    bytes = psx_ram_live_bytes() - addr;
                 overlay_capture_before_dma(addr, bytes);
             }
             while (a->remaining_words > 0 && words_budget > 0 && cdrom_dma_ready()) {
@@ -1137,7 +1312,7 @@ void dma_advance(uint32_t cycles) {
                 psx_write_word(addr, word);
                 record_cdrom_dma_word(word);
                 dirty_ram_mark_executable_range(addr, 4);
-                addr = (addr + addr_step) & 0x1FFFFCu;
+                addr = DMA_RAM_ADDR((addr + addr_step));
                 a->remaining_words--;
                 words_budget--;
                 moved++;
@@ -1164,6 +1339,7 @@ void dma_init(void) {
     memset(channels, 0, sizeof(channels));
     memset(mdec_async, 0, sizeof(mdec_async));
     memset(&cdrom_async, 0, sizeof(cdrom_async));
+    memset(&gpu_linked_list, 0, sizeof(gpu_linked_list));
     memset(delayed_complete, 0, sizeof(delayed_complete));
     dpcr = 0x07654321u; /* default: priorities set, no channels enabled */
     dicr = 0;
@@ -1189,7 +1365,15 @@ uint32_t dma_read(uint32_t addr) {
         switch (reg) {
             case 0x00: return channels[ch].madr;
             case 0x04: return channels[ch].bcr;
-            case 0x08: return channels[ch].chcr;
+            case 0x08:
+                if (ch == 2) {
+                    gpu_ot_stats.chcr_reads_total++;
+                    if (gpu_linked_list.active) {
+                        gpu_ot_stats.chcr_reads_in_walk++;
+                        gpu_ot_polls_this_walk++;
+                    }
+                }
+                return channels[ch].chcr;
             case 0x0C: return 0;
             default: goto bad;
         }
@@ -1276,6 +1460,13 @@ void dma_write(uint32_t addr, uint32_t val) {
     dma_write_masked(addr, val, 0xFFFFFFFFu);
 }
 
+void dma_debug_get_gpu_ot_stats(DMAGpuOtStats* out) {
+    if (!out) return;
+    *out = gpu_ot_stats;
+    out->initiator_pc = s_dma_ch_initiator_pc[2];
+    out->active = gpu_linked_list.active;
+}
+
 uint64_t dma_debug_get_trace(const DMATraceEntry** out_entries) {
     if (out_entries) *out_entries = dma_trace;
     return dma_trace_seq;
@@ -1308,14 +1499,18 @@ void dma_debug_get_state(DMADebugState* out) {
         out->channels[i].chcr = channels[i].chcr;
         out->channels[i].active =
             ((i < 2) ? mdec_async[i].active : 0) ||
+            ((i == 2) ? gpu_linked_list.active : 0) ||
             ((i == 3) ? cdrom_async.active : 0) ||
             delayed_complete[i].active;
         out->channels[i].remaining_words =
             (i < 2 && mdec_async[i].active) ? mdec_async[i].remaining_words :
+            (i == 2 && gpu_linked_list.active)
+                ? gpu_linked_list.word_count - gpu_linked_list.payload_index :
             (i == 3 && cdrom_async.active) ? cdrom_async.remaining_words :
             delayed_complete[i].total_words;
         out->channels[i].cycles_accum =
             (i < 2 && mdec_async[i].active) ? mdec_async[i].cycles_accum :
+            (i == 2 && gpu_linked_list.active) ? gpu_linked_list.cycles_remaining :
             (i == 3 && cdrom_async.active) ? cdrom_async.cycles_accum :
             delayed_complete[i].cycles_remaining;
     }
@@ -1327,8 +1522,10 @@ void dma_debug_get_state(DMADebugState* out) {
 /* DMAChannel = 3×u32 (no pad). Async/delayed structs have host padding — field LE. */
 #define DMA_ASYNC_WIRE (1u + 1u + 4u + 4u + 4u + 4u) /* 18 */
 #define DMA_DELAY_WIRE (1u + 4u + 4u)                 /* 9 */
+#define DMA_GPU_LL_WIRE (4u + (10u * 4u))             /* 44 */
 #define DMA_SNAP_WIRE_BYTES ( \
-    (7u * 12u) + 4u + 4u + (2u * DMA_ASYNC_WIRE) + DMA_ASYNC_WIRE + (7u * DMA_DELAY_WIRE))
+    (7u * 12u) + 4u + 4u + (2u * DMA_ASYNC_WIRE) + DMA_ASYNC_WIRE + \
+    DMA_GPU_LL_WIRE + (7u * DMA_DELAY_WIRE))
 
 static int dma_w_async(PstW *w, const DMAAsyncChannel *a) {
     return pst_w_u8(w, a->active) && pst_w_u8(w, a->debug_started) &&
@@ -1339,6 +1536,28 @@ static int dma_r_async(PstR *r, DMAAsyncChannel *a) {
     return pst_r_u8(r, &a->active) && pst_r_u8(r, &a->debug_started) &&
            pst_r_u32(r, &a->total_words) && pst_r_u32(r, &a->remaining_words) &&
            pst_r_u32(r, &a->cycles_accum) && pst_r_u32(r, &a->start_addr);
+}
+static int dma_w_gpu_ll(PstW *w, const DMAGPULinkedList *s) {
+    return pst_w_u8(w, s->active) && pst_w_u8(w, s->phase) &&
+           pst_w_u8(w, s->emit_node) && pst_w_u8(w, s->hit_limit) &&
+           pst_w_u32(w, s->start_addr) && pst_w_u32(w, s->current_addr) &&
+           pst_w_u32(w, s->next_addr) && pst_w_u32(w, s->word_count) &&
+           pst_w_u32(w, s->payload_index) &&
+           pst_w_u32(w, s->cycles_remaining) &&
+           pst_w_u32(w, s->nodes_processed) && pst_w_u32(w, s->max_nodes) &&
+           pst_w_u32(w, s->total_words) && pst_w_u32(w, s->empty_rank);
+}
+static int dma_r_gpu_ll(PstR *r, DMAGPULinkedList *s) {
+    int ok = pst_r_u8(r, &s->active) && pst_r_u8(r, &s->phase) &&
+           pst_r_u8(r, &s->emit_node) && pst_r_u8(r, &s->hit_limit) &&
+           pst_r_u32(r, &s->start_addr) && pst_r_u32(r, &s->current_addr) &&
+           pst_r_u32(r, &s->next_addr) && pst_r_u32(r, &s->word_count) &&
+           pst_r_u32(r, &s->payload_index) &&
+           pst_r_u32(r, &s->cycles_remaining) &&
+           pst_r_u32(r, &s->nodes_processed) && pst_r_u32(r, &s->max_nodes) &&
+           pst_r_u32(r, &s->total_words) && pst_r_u32(r, &s->empty_rank);
+    return ok && s->payload_index <= s->word_count &&
+           s->phase <= DMA_GPU_LL_PHASE_PAYLOAD;
 }
 static int dma_w_delay(PstW *w, const DMADelayedComplete *d) {
     return pst_w_u8(w, d->active) && pst_w_u32(w, d->total_words) &&
@@ -1364,12 +1583,14 @@ void dma_snapshot_write(uint8_t *p) {
     dma_w_async(&w, &mdec_async[0]);
     dma_w_async(&w, &mdec_async[1]);
     dma_w_async(&w, &cdrom_async);
+    dma_w_gpu_ll(&w, &gpu_linked_list);
     for (int i = 0; i < 7; i++)
         dma_w_delay(&w, &delayed_complete[i]);
 }
 
 int dma_snapshot_read(const uint8_t *p, uint32_t len) {
     PstR r;
+    int gpu_ll_was_active = gpu_linked_list.active != 0;
     if (len != DMA_SNAP_WIRE_BYTES) return 0;
     pst_r_init(&r, p, len);
     for (int i = 0; i < 7; i++) {
@@ -1379,9 +1600,15 @@ int dma_snapshot_read(const uint8_t *p, uint32_t len) {
     }
     if (!pst_r_u32(&r, &dpcr) || !pst_r_u32(&r, &dicr)) return 0;
     if (!dma_r_async(&r, &mdec_async[0]) || !dma_r_async(&r, &mdec_async[1]) ||
-        !dma_r_async(&r, &cdrom_async))
+        !dma_r_async(&r, &cdrom_async) || !dma_r_gpu_ll(&r, &gpu_linked_list))
         return 0;
     for (int i = 0; i < 7; i++)
         if (!dma_r_delay(&r, &delayed_complete[i])) return 0;
+    if (gpu_ll_was_active) gpu_ws_end_linked_list();
+    if (gpu_linked_list.active) {
+        gpu_ws_begin_linked_list();
+        gpu_ws_prepass_linked_list(gpu_linked_list.start_addr);
+        gpu_ws_restore_linked_list_rank(gpu_linked_list.empty_rank);
+    }
     return 1;
 }

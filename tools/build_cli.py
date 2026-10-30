@@ -116,8 +116,10 @@ def main() -> int:
     bios_profiles = {
         "OpenBIOS.toml": ROOT / "bios" / "OpenBIOS.toml",
         "SCPH1001.toml": ROOT / "bios" / "SCPH1001.toml",
-        "SCPH101.toml": ROOT / "SCPH101.toml",
-        "SCPH5552.toml": ROOT / "SCPH5552.toml",
+        "SCPH101.toml": ROOT / "bios" / "SCPH101.toml",
+        "SCPH5500.toml": ROOT / "bios" / "SCPH5500.toml",
+        "SCPH5501.toml": ROOT / "bios" / "SCPH5501.toml",
+        "SCPH5552.toml": ROOT / "bios" / "SCPH5552.toml",
     }
     (framework / "bios").mkdir()
     for filename, source in bios_profiles.items():

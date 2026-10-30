@@ -38,8 +38,10 @@
 #include <time.h>
 
 #include "cpu_state.h"
+#include "psx_memory.h"
 #include "psx_bss.h"
 #include "crash_trace.h"
+#include "psx_segment_miss.h"
 #include "autocompile.h"   /* autocompile_degraded_reason — stamp a degraded
                             * (interpreter-only) run into its own report */
 
@@ -53,7 +55,11 @@ static const char *kReportPath = "psx_last_run_report.json";
 #ifndef PSX_BUILD_REV
 #define PSX_BUILD_REV "unknown"
 #endif
+#ifdef PSX_BUILD_IMPLEMENTATIONS
+static const char *kBuildId = PSX_BUILD_REV " (" __DATE__ " " __TIME__ ") implementations=" PSX_BUILD_IMPLEMENTATIONS;
+#else
 static const char *kBuildId = PSX_BUILD_REV " (" __DATE__ " " __TIME__ ")";
+#endif
 
 /* CPU state pointer (set by debug server at init). */
 extern CPUState *debug_cpu_ptr;
@@ -166,8 +172,9 @@ static int crash_peek_guest(uint32_t vaddr, uint8_t *dst, int len) {
         return len;
     }
     if (phys < 0x00800000u && g_psx_ram) {
-        uint32_t folded = phys & 0x1FFFFFu;
-        if (folded + (uint32_t)len > 0x200000u) len = (int)(0x200000u - folded);
+        uint32_t folded = psx_ram_canonical_offset(phys);
+        if (folded + (uint32_t)len > psx_ram_live_bytes())
+            len = (int)(psx_ram_live_bytes() - folded);
         if (len <= 0) return 0;
         memcpy(dst, g_psx_ram + folded, (size_t)len);
         return len;
@@ -774,6 +781,32 @@ void psx_crash_trace_dump(const char *reason, void *seh_info) {
         append_str(buf, sizeof(buf), &pos, "]\n  },\n");
     }
 
+    /* segment misses (docs/SEGMENT_AWARE_CODE.md §5.5): static game text
+     * entered at a PC whose compiled row is in another segment, each run
+     * interpreted (kind "game"), and compiled BIOS windows entered in another
+     * segment than their body's, each run through the home body (kind
+     * "bios", §5.4). Top 50 PCs by count. */
+    {
+        enum { kRows = 50 };
+        uint32_t addrs[kRows], homes[kRows], kinds[kRows];
+        uint64_t counts[kRows];
+        uint32_t n = psx_segment_miss_summary(addrs, homes, counts, kinds, kRows);
+        append_fmt(buf, sizeof(buf), &pos,
+            "  \"segment_misses\": {\n"
+            "    \"total\": %llu,\n"
+            "    \"unique\": %u,\n"
+            "    \"top\": [",
+            (unsigned long long)psx_segment_miss_total(), psx_segment_miss_unique());
+        for (uint32_t i = 0; i < n; i++) {
+            append_fmt(buf, sizeof(buf), &pos,
+                "%s{\"pc\":\"0x%08X\",\"home\":\"0x%08X\",\"count\":%llu,"
+                "\"kind\":\"%s\"}",
+                i == 0 ? "" : ",", addrs[i], homes[i], (unsigned long long)counts[i],
+                psx_segment_miss_kind_name(kinds[i]));
+        }
+        append_str(buf, sizeof(buf), &pos, "]\n  },\n");
+    }
+
     /* dirty_block_log tail (last 100) */
     {
         uint64_t total = g_dirty_ram_block_log_seq;
@@ -878,7 +911,11 @@ static void psx_signal_handler(int sig) {
  * exit(0) so __gcov_exit / instr-profile writers run. Not async-signal-safe;
  * acceptable for intentional train/Ctrl+C stop. */
 static void psx_soft_exit_handler(int sig) {
-    (void)sig;
+    /* Tag the origin so the report distinguishes a train-script kill or
+     * Ctrl+C from an untagged exit() (which stays "unknown" on purpose). */
+    psx_crash_trace_set_exit_origin(sig == SIGINT  ? "signal_sigint" :
+                                    sig == SIGTERM ? "signal_sigterm" :
+                                                     "signal_soft");
     exit(0);
 }
 
@@ -894,6 +931,12 @@ static LONG WINAPI psx_seh_handler(EXCEPTION_POINTERS *info) {
 static BOOL WINAPI psx_console_ctrl_handler(DWORD type) {
     if (type == CTRL_C_EVENT || type == CTRL_BREAK_EVENT ||
         type == CTRL_CLOSE_EVENT) {
+        /* A console torn down under the game (terminal crash, window X)
+         * used to report as atexit/unknown — indistinguishable from an
+         * SDL window close. Name the event. */
+        psx_crash_trace_set_exit_origin(type == CTRL_CLOSE_EVENT ? "console_close" :
+                                        type == CTRL_BREAK_EVENT ? "console_ctrl_break" :
+                                                                   "console_ctrl_c");
         exit(0);
         return TRUE;
     }

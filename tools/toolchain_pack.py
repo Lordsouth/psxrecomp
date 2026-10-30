@@ -1,6 +1,6 @@
 """Resolve / download / unpack portable cmake-clang-v1 toolchain packs.
 
-Shared cache matches RetComM / retcomm-toolchains install.sh:
+Shared cache matches Retro / retcomm-toolchains install.sh:
 
   Windows: %LOCALAPPDATA%/retcomm/toolchains/cmake-clang-v1/<tag>/
   Linux/macOS: $XDG_DATA_HOME/retcomm/… and ~/.local/share/retcomm/…
@@ -20,13 +20,11 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import urllib.error
-import urllib.request
 import zipfile
 from pathlib import Path
 from typing import Optional
 
-DEFAULT_REPO = "TechnicallyComputers/retcomm-toolchains"
+DEFAULT_REPO = "RetroPortingToolKit/RetroPorting-Toolchains"
 PACK_ID = "cmake-clang-v1"
 
 _ASSET = {
@@ -286,7 +284,7 @@ def shared_cache_roots() -> list[Path]:
     Layout matches retcomm-toolchains install.sh:
       …/retcomm/toolchains/cmake-clang-v1/<tag>/   plus latest → current
 
-    RetComM (`retcomm`) is preferred; legacy `psxrecomp` remains a read/migrate
+    Retro (`retcomm`) is preferred; legacy `psxrecomp` remains a read/migrate
     fallback. Honors RETCOMM_TOOLCHAIN_CACHE / RETCOMM_DATA_HOME.
     """
     roots: list[Path] = []
@@ -307,7 +305,7 @@ def shared_cache_roots() -> list[Path]:
 
 
 def preferred_install_root() -> Path:
-    """Where newly downloaded / offline-unpacked packs land (RetComM shared)."""
+    """Where newly downloaded / offline-unpacked packs land (Retro shared)."""
     cache = (os.environ.get("RETCOMM_TOOLCHAIN_CACHE") or "").strip()
     if cache:
         r = Path(cache).expanduser()
@@ -357,12 +355,29 @@ def version_satisfies(have: str, need: str) -> bool:
     return parse_version_tuple(have) >= parse_version_tuple(need)
 
 
-def default_min_version() -> str:
-    """Optional semver floor. Empty by default — wizard downloads /releases/latest.
+# Framework floor, not a per-title pin: v1.0.14 is the first pack with the
+# Linux build sysroot (glibc/libstdc++/GL headers + stubs). Older cached packs
+# compile against host headers, which do not exist on stock SteamOS, and their
+# objects mis-link after a pack upgrade (__isoc23_strtoul). Because the cache
+# is accepted forever once any cmake runs, a floor is the only way a stale
+# pre-sysroot pack ever gets replaced.
+DEFAULT_MIN_VERSION = "1.0.14"
 
-    Set RETCOMM_TOOLCHAIN_MIN_VERSION only when you need to reject stale caches.
+# RETCOMM_TOOLCHAIN_MIN_VERSION values that disable the floor entirely.
+_MIN_VERSION_DISABLE = {"0", "off", "none"}
+
+
+def default_min_version() -> str:
+    """Semver floor for accepted packs (DEFAULT_MIN_VERSION unless overridden).
+
+    RETCOMM_TOOLCHAIN_MIN_VERSION overrides in either direction: a version
+    raises/lowers the floor, and "0" / "off" / "none" disables it (accept any
+    usable pack, matching the pre-floor behavior).
     """
-    return (os.environ.get("RETCOMM_TOOLCHAIN_MIN_VERSION") or "").strip()
+    env = (os.environ.get("RETCOMM_TOOLCHAIN_MIN_VERSION") or "").strip()
+    if env:
+        return "" if env.lower() in _MIN_VERSION_DISABLE else env
+    return DEFAULT_MIN_VERSION
 
 
 def pack_satisfies_min(root: Path, min_version: str = "") -> bool:
@@ -790,7 +805,7 @@ def _register_user_path_unix(cache_root: Path, latest: Path, log=None) -> None:
     )
     block = (
         f"{_MARKER_BEGIN}\n"
-        f"# Managed by psxrecomp / RetComM — remove via uninstall.sh\n"
+        f"# Managed by psxrecomp / Retro — remove via uninstall.sh\n"
         f'if [ -f "{hook}" ]; then\n'
         f"  # shellcheck disable=SC1091\n"
         f'  . "{hook}"\n'
@@ -818,7 +833,7 @@ def _register_user_path_unix(cache_root: Path, latest: Path, log=None) -> None:
 def register_toolchain_user_env(pack_root: Path, log=None) -> Path:
     """Refresh ``latest`` + idempotently add ``latest/bin`` to the user login PATH.
 
-    Mirrors retcomm-toolchains zip ``install.sh`` / ``install.ps1`` so RetComM
+    Mirrors retcomm-toolchains zip ``install.sh`` / ``install.ps1`` so Retro
     setup hosts and the standalone wizard leave cmake/clang on PATH for shell
     development after placing the pack in the shared cache.
     """
@@ -870,6 +885,20 @@ def unpack_zip_to(zip_path: Path, dest: Path) -> Path:
     dest.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(zip_path, "r") as zf:
         zf.extractall(dest)
+        # zipfile.extractall() discards the Unix mode held in external_attr, so
+        # on POSIX hosts every binary lands 0644 and the pack is unusable:
+        # "Toolchain cmake probe failed ... [Errno 13] Permission denied".
+        # Restore the recorded mode (zips built on Windows record none, in
+        # which case the extracted default is already correct).
+        if os.name != "nt":
+            for info in zf.infolist():
+                if info.is_dir():
+                    continue
+                mode = (info.external_attr >> 16) & 0o7777
+                if mode:
+                    target = dest / info.filename
+                    if target.exists():
+                        target.chmod(mode)
     root = unwrap_pack_root(dest)
     if not pack_root_looks_usable(root):
         raise RuntimeError(f"toolchain zip missing bin/{cmake_name()}: {zip_path}")
@@ -928,6 +957,11 @@ def install_from_zip(
 
 
 def download_url(url: str, dest: Path, token: Optional[str] = None) -> None:
+    # Lazy: keep urllib off the import path so `python tools/...` still works
+    # when ambient PYTHONHOME breaks _socket (launcher clears PYTHONHOME on
+    # spawn).
+    import urllib.request
+
     dest.parent.mkdir(parents=True, exist_ok=True)
     req = urllib.request.Request(url, headers={"User-Agent": "psxrecomp-toolchain"})
     if token:
@@ -944,6 +978,8 @@ def download_latest_pack(
     project_root: Optional[Path] = None,
     min_version: str = "",
 ) -> Path:
+    import urllib.error
+
     art = artifact or host_artifact()
     asset = _ASSET.get(art)
     if not asset:
@@ -1003,9 +1039,33 @@ def ensure_toolchain(
     Resolution order: env override → project stamp/toolchain/ → shared
     retcomm cache (legacy psxrecomp migrated) → optional --from-zip → download.
 
-    Installs always land under the shared RetComM cache; the project only gets
+    Installs always land under the shared Retro cache; the project only gets
     a stamp file pointing at that pack.
     """
+    if not sys_platform_is_windows() and from_zip is None:
+        # Setup/rebuild on Linux and macOS uses native tools. Do not turn a
+        # missing dependency into an unsolicited portable-pack download.
+        groups = (("cmake",), ("ninja",), ("python3", "python"),
+                  ("cc", "gcc", "clang"), ("c++", "g++", "clang++"))
+        resolved = []
+        for names in groups:
+            command = next(filter(None, (shutil.which(name) for name in names)), None)
+            if command:
+                try:
+                    result = subprocess.run([command, "--version"], capture_output=True,
+                                            text=True, timeout=30, check=False)
+                    if result.returncode == 0:
+                        resolved.append(command)
+                        continue
+                except (OSError, subprocess.SubprocessError):
+                    pass
+            raise RuntimeError("Native build tools are missing or unusable: {}. Install CMake, "
+                               "Ninja, Python 3 and C/C++ compilers with your package manager."
+                               .format("/".join(names)))
+        if log:
+            log("Using native build tools on PATH")
+        return Path(resolved[0]).parent
+
     need = min_version or default_min_version()
     if is_windows_store_python() and log:
         log(
@@ -1055,7 +1115,8 @@ def ensure_toolchain(
         )
 
     # Usable pack exists but is too old — fall through to download/replace.
-    stale = resolve_toolchain_bin(project_root, min_version="")
+    # min_version="0" probes without the default floor ("" would re-apply it).
+    stale = resolve_toolchain_bin(project_root, min_version="0")
     if stale and need and not existing and log:
         log(
             f"Cached toolchain does not meet min_version {need}; "

@@ -100,16 +100,29 @@ static const uint8_t FONT8[59][8] = {
 };
 #endif
 
+/* Title block (psx_mod_set_rewind_blocked): set by the running title while
+ * a mode it cannot rewind is live, cleared at every mod session start. */
+static int s_title_blocked;
+
+int psx_rewind_title_blocked(void)
+{
+    return s_title_blocked;
+}
+
 #if !defined(PSX_HAS_RBENGINE_SNAP)
 
+void psx_rewind_set_title_blocked(int blocked) { s_title_blocked = blocked ? 1 : 0; }
+uint32_t psx_rewind_snap_count(void) { return 0; }
 void psx_rewind_set_depth(uint32_t depth) { (void)depth; }
 void psx_rewind_set_interval(uint32_t interval) { (void)interval; }
+void psx_rewind_set_enabled(int enabled) { (void)enabled; }
 void psx_rewind_configure(uint32_t bios_checksum, uint32_t entry_pc)
 {
     (void)bios_checksum;
     (void)entry_pc;
 }
 void psx_rewind_shutdown(void) {}
+uint32_t psx_rewind_discard_history(void) { return 0; }
 int  psx_rewind_enabled(void) { return 0; }
 int  psx_rewind_is_open(void) { return 0; }
 int  psx_rewind_needs_present(void) { return 0; }
@@ -154,6 +167,7 @@ static uint32_t s_fmv_interval = RW_DEF_FMV_INTERVAL;
 static uint32_t s_depth = RW_DEF_DEPTH;
 static int s_depth_pref = -1; /* -1 = unset; else from settings.toml / launcher */
 static int s_interval_pref = -1;
+static int s_enabled_pref = -1; /* -1 = unset; else from settings.toml / launcher */
 static uint32_t s_frame;
 static uint32_t s_last_capture_frame = 0xffffffffu;
 static int s_capture_due;
@@ -242,15 +256,35 @@ void psx_rewind_set_interval(uint32_t interval)
         s_interval = (uint32_t)s_interval_pref;
 }
 
+void psx_rewind_set_enabled(int enabled)
+{
+    const char *e = getenv("PSX_REWIND");
+    s_enabled_pref = enabled ? 1 : 0;
+    /* PSX_REWIND is the operator's override and outranks the UI, so once it
+     * has spoken the preference only records intent. Otherwise apply now; the
+     * caller re-arms (configure) or tears down (shutdown) to match. */
+    if (e && e[0])
+        return;
+    if (s_enabled >= 0)
+        s_enabled = s_enabled_pref;
+}
+
 static int rewind_wanted(void)
 {
     const char *e;
     if (s_enabled < 0) {
+        /* Off unless asked for. The ring holds up to RW_MAX_DEPTH machine
+         * snapshots (2 MB RAM + 1 MB VRAM + 512 KB SPU RAM each) and captures
+         * one every s_interval frames, which is real cost on a low-end host
+         * for a feature most sessions never open. Order: env wins, then the
+         * settings.toml / launcher preference, then off. */
         e = getenv("PSX_REWIND");
-        if (e && e[0] == '0')
-            s_enabled = 0;
+        if (e && e[0])
+            s_enabled = (e[0] == '0') ? 0 : 1;
+        else if (s_enabled_pref >= 0)
+            s_enabled = s_enabled_pref;
         else
-            s_enabled = 1;
+            s_enabled = 0;
         {
             uint32_t iv_def = s_interval_pref > 0 ? (uint32_t)s_interval_pref
                                                   : RW_DEF_INTERVAL;
@@ -299,16 +333,20 @@ static int resume_pc_ok(uint32_t pc)
  * savestate_resolve_resume_pc / selfcheck sc_pick_snap_pc. */
 static uint32_t rewind_resolve_resume_pc(const CPUState *cpu, uint32_t hint)
 {
-    const uint32_t cands[6] = {
-        hint,
-        cpu ? cpu->pc : 0u,
-        psx_compiled_irq_resume_pc(),
-        psx_last_irq_check_pc(),
-        psx_netplay_rb_sticky_bb_pc(),
-        cpu ? cpu->gpr[31] : 0u,
-    };
+    uint32_t cands[7];
+    int n = 0;
     int i;
-    for (i = 0; i < 6; ++i) {
+
+    if (psx_irq_resume_context_snapshot_site() != 0)
+        cands[n++] = psx_irq_resume_context_snapshot_pc();
+    cands[n++] = hint;
+    cands[n++] = cpu ? cpu->pc : 0u;
+    cands[n++] = psx_compiled_irq_resume_pc();
+    cands[n++] = psx_last_irq_check_pc();
+    cands[n++] = psx_netplay_rb_sticky_bb_pc();
+    cands[n++] = cpu ? cpu->gpr[31] : 0u;
+
+    for (i = 0; i < n; ++i) {
         if (resume_pc_ok(cands[i]))
             return cands[i];
     }
@@ -426,6 +464,19 @@ void psx_rewind_shutdown(void)
     s_capture_due = 0;
 }
 
+uint32_t psx_rewind_discard_history(void)
+{
+    uint32_t dropped = s_count;
+    if (!s_configured || !s_ring) return 0;
+    rbe_snap_ring_clear(s_ring);
+    s_count = 0;
+    s_sel = 0;
+    s_load_pending = 0;
+    s_last_capture_frame = 0xffffffffu;
+    s_panel_dirty = 1;
+    return dropped;
+}
+
 int psx_rewind_enabled(void)
 {
     return rewind_wanted() && s_configured && s_ring != NULL;
@@ -436,6 +487,11 @@ int psx_rewind_is_open(void)
     return s_open;
 }
 
+uint32_t psx_rewind_snap_count(void)
+{
+    return s_count;
+}
+
 int psx_rewind_needs_present(void)
 {
     return s_open || s_slide > 0.01f || s_anim_dir != 0;
@@ -444,7 +500,8 @@ int psx_rewind_needs_present(void)
 void psx_rewind_note_frame(void)
 {
     uint32_t iv;
-    if (!psx_rewind_enabled() || s_open || psx_netplay_active())
+    if (!psx_rewind_enabled() || s_open || psx_netplay_active() ||
+        s_title_blocked)
         return;
     s_frame++;
     iv = rewind_capture_interval();
@@ -465,7 +522,7 @@ static int do_capture(CPUState *cpu, uint32_t resume_pc)
     if (!cpu || !s_ring)
         return 0;
     pc = rewind_resolve_resume_pc(cpu, resume_pc);
-    if (!resume_pc_ok(pc))
+    if (!psx_irq_resume_context_snapshot_safe_at(pc) || !resume_pc_ok(pc))
         return 0;
     snap = *cpu;
     snap.pc = pc;
@@ -526,16 +583,25 @@ void psx_rewind_poll(CPUState *cpu, uint32_t resume_pc)
         (void)do_load(cpu, tick);
         return;
     }
-    if (s_capture_due && !s_open && !psx_netplay_active())
+    if (s_capture_due && !s_open && !psx_netplay_active() && !s_title_blocked)
         (void)do_capture(cpu, resume_pc);
 }
 
 int psx_rewind_toggle(void)
 {
-    if (!psx_rewind_enabled())
+    if (!psx_rewind_enabled()) {
+        /* Rewind is off by default, so this is now the common case: say why
+         * rather than leaving F8 / Select+R3 looking broken. Silent only when
+         * the feature was compiled out, where there is nothing to turn on. */
+        host_osd_push("Rewind is off — enable it in Settings", 1800);
         return 0;
+    }
     if (psx_netplay_active()) {
         host_osd_push("Rewind off during netplay", 1500);
+        return 0;
+    }
+    if (s_title_blocked && !s_open) {
+        host_osd_push("Rewind is off in this mode", 1500);
         return 0;
     }
     if (s_open) {
@@ -555,6 +621,17 @@ int psx_rewind_toggle(void)
     s_panel_dirty = 1;
     host_osd_push(s_count ? "Rewind" : "Rewind (no snaps yet)", 1200);
     return 1;
+}
+
+void psx_rewind_set_title_blocked(int blocked)
+{
+    s_title_blocked = blocked ? 1 : 0;
+    if (!s_title_blocked)
+        return;
+    /* Captures stop here; one already scheduled is dropped so nothing from
+     * the blocked mode lands in history. An open panel closes unloaded. */
+    s_capture_due = 0;
+    (void)psx_rewind_cancel();
 }
 
 int psx_rewind_cancel(void)

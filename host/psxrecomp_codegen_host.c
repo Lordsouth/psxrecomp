@@ -2,10 +2,13 @@
 
 #include "psxrecomp_codegen_host.h"
 
+#include "psx_bios_known_images.h"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #if defined(_WIN32)
 #  include <windows.h>
@@ -14,9 +17,13 @@
 #  include <errno.h>
 #  include <fcntl.h>
 #  include <spawn.h>
+#  include <strings.h>
 #  include <sys/stat.h>
 #  include <sys/wait.h>
 #  include <unistd.h>
+#  if defined(__APPLE__)
+#    include <mach-o/dyld.h>
+#  endif
 extern char** environ;
 #endif
 
@@ -63,6 +70,14 @@ static const char* cfg_or(const char* v, const char* d) {
     return (v && v[0]) ? v : d;
 }
 
+static int ascii_strcasecmp(const char* a, const char* b) {
+#if defined(_WIN32)
+    return _stricmp(a, b);
+#else
+    return strcasecmp(a, b);
+#endif
+}
+
 static int path_is_file(const char* path) {
 #if defined(_WIN32)
     DWORD attr = GetFileAttributesA(path);
@@ -72,6 +87,30 @@ static int path_is_file(const char* path) {
     struct stat st;
     return stat(path, &st) == 0 && S_ISREG(st.st_mode);
 #endif
+}
+
+/* Read the first line of a small text file into out, trimming EOL and any
+ * trailing spaces. Returns 1 on success. Used for the exe-name marker CMake
+ * writes; anything unreadable just leaves the caller on its fallback. */
+static int read_first_line(const char* path, char* out, size_t cap) {
+    FILE* f;
+    size_t n;
+    if (!path || !out || cap == 0)
+        return 0;
+    f = fopen(path, "rb");
+    if (!f)
+        return 0;
+    if (!fgets(out, (int)cap, f)) {
+        fclose(f);
+        out[0] = '\0';
+        return 0;
+    }
+    fclose(f);
+    n = strlen(out);
+    while (n > 0 && (out[n - 1] == '\n' || out[n - 1] == '\r' ||
+                     out[n - 1] == ' ' || out[n - 1] == '\t'))
+        out[--n] = '\0';
+    return out[0] != '\0';
 }
 
 static int path_is_absolute(const char* path) {
@@ -441,7 +480,7 @@ static int python_env_usable(const char* env) {
     return 1;
 }
 
-/* Prefer portable pack CPython (RetComM / cmake-clang-v1), then system. */
+/* Prefer portable pack CPython (Retro / cmake-clang-v1), then system. */
 static int find_python(char* out, size_t cap) {
     const char* env = getenv("RETCOMM_PYTHON");
     if (python_env_usable(env)) {
@@ -453,9 +492,9 @@ static int find_python(char* out, size_t cap) {
         snprintf(out, cap, "%s", env);
         return 1;
     }
+#if defined(_WIN32)
     if (find_toolchain_python(out, cap))
         return 1;
-#if defined(_WIN32)
     /* Prefer python.org / py-launcher installs over the Microsoft Store
      * stub: Store Python redirects LocalAppData writes into LocalCache. */
     char resolved[1100];
@@ -760,6 +799,10 @@ static int resolve_toolchain_bin(char* out, size_t cap) {
 static void activate_toolchain_path(void) {
     char pack_root[1400];
     g_toolchain_bin[0] = '\0';
+#if !defined(_WIN32)
+    /* A cached portable pack must not shadow Linux/macOS native tools. */
+    return;
+#endif
     if (!resolve_toolchain_bin(g_toolchain_bin, sizeof(g_toolchain_bin)))
         return;
     /* Pack root (parent of bin/) — Windows cmake-clang-v1 ships zlib here. */
@@ -868,6 +911,9 @@ static int find_cmake(char* out, size_t cap) {
         snprintf(out, cap, "%s", env);
         return 1;
     }
+#if !defined(_WIN32)
+    return find_on_path("cmake", out, cap);
+#endif
     char tc[1100], cand[1200];
     if (resolve_toolchain_bin(tc, sizeof(tc))) {
 #if defined(_WIN32)
@@ -910,9 +956,32 @@ static int walk_up_for_project_root(const char* start, char* out, size_t cap) {
     return 0;
 }
 
+#if !defined(_WIN32)
+/* Canonical path of the running executable on POSIX hosts. /proc/self/exe is
+ * Linux-only; macOS has no procfs, so there the path comes from dyld. */
+static int host_posix_exe_path(char* out, size_t cap) {
+    char* rp = NULL;
+#  if defined(__APPLE__)
+    char raw[1100];
+    uint32_t n = (uint32_t)sizeof(raw);
+    if (_NSGetExecutablePath(raw, &n) != 0)
+        return 0;
+    rp = realpath(raw, NULL);
+#  else
+    rp = realpath("/proc/self/exe", NULL);
+#  endif
+    if (!rp)
+        return 0;
+    snprintf(out, cap, "%s", rp);
+    free(rp);
+    return out[0] != '\0';
+}
+#endif
+
 /* Directory containing this process's executable (not cwd). Dolphin / .desktop
- * launches leave cwd as $HOME — VIDEO/PGO/setup must still find the zip tree.
- * Linux: $APPIMAGE parent, else /proc/self/exe. Windows: GetModuleFileName. */
+ * and Finder launches leave cwd as $HOME — VIDEO/PGO/setup must still find the
+ * zip tree. Linux: $APPIMAGE parent, else /proc/self/exe. macOS: dyld's
+ * executable path. Windows: GetModuleFileName. */
 static int resolve_host_exe_dir(char* out, size_t cap) {
     char exe[1100];
     if (!out || cap < 2)
@@ -931,12 +1000,8 @@ static int resolve_host_exe_dir(char* out, size_t cap) {
         const char* appimg = getenv("APPIMAGE");
         if (appimg && appimg[0] && path_is_file(appimg)) {
             snprintf(exe, sizeof(exe), "%s", appimg);
-        } else {
-            char* rp = realpath("/proc/self/exe", NULL);
-            if (!rp)
-                return 0;
-            snprintf(exe, sizeof(exe), "%s", rp);
-            free(rp);
+        } else if (!host_posix_exe_path(exe, sizeof(exe))) {
+            return 0;
         }
     }
 #endif
@@ -964,7 +1029,7 @@ static int name_is_releases(const char* name) {
 #endif
 }
 
-/* RetComM stages Play under apps/<title>/releases/<tag>/ while the generate
+/* Retro stages Play under apps/<title>/releases/<tag>/ while the generate
  * tree lives at apps/<title>/src/current/. Walking parents of the release dir
  * never visits that sibling — probe it explicitly. */
 static int try_retcomm_src_current(const char* start, char* out, size_t cap) {
@@ -1075,24 +1140,94 @@ static int resolve_build_paths(void) {
         }
     }
 
+    /* Prefer the name CMake published over the one baked into codegen_setup.c.
+     * Both are MAKE_C_IDENTIFIER(WINDOW_TITLE), but from two separate copies of
+     * the title, so renaming a game leaves this one pointing at an executable
+     * that is never produced. runtime.cmake writes the name it really used to
+     * psxrecomp_exe_name-<target>.txt beside the build. */
+    char basename[256];
+    snprintf(basename, sizeof(basename), "%s", g_exe_basename);
+    if (g_cfg && g_cfg->cmake_target && g_cfg->cmake_target[0]) {
+        char marker[1200], published[256];
+        snprintf(published, sizeof(published), "psxrecomp_exe_name-%s.txt",
+                 g_cfg->cmake_target);
+        if (join_path(marker, sizeof(marker), g_build_dir, published) &&
+            read_first_line(marker, published, sizeof(published)) &&
+            published[0])
+            snprintf(basename, sizeof(basename), "%s", published);
+    }
+
     char exe_name[300];
 #if defined(_WIN32)
-    snprintf(exe_name, sizeof(exe_name), "%s.exe", g_exe_basename);
+    snprintf(exe_name, sizeof(exe_name), "%s.exe", basename);
 #else
-    snprintf(exe_name, sizeof(exe_name), "%s", g_exe_basename);
+    snprintf(exe_name, sizeof(exe_name), "%s", basename);
 #endif
     return join_path(g_exe_path, sizeof(g_exe_path), g_build_dir, exe_name);
 }
 
+#ifndef PSX_SETUP_BIOS_STEMS
+#define PSX_SETUP_BIOS_STEMS "OpenBIOS|SCPH1001"
+#endif
+#ifndef PSX_SETUP_FRAMEWORK_REL
+#define PSX_SETUP_FRAMEWORK_REL "psxrecomp"
+#endif
+
+/* Match runtime.cmake: a requested pair with its backend descriptor. A stale
+ * pre-descriptor pair or unrelated game dispatch cannot complete BIOS setup. */
+static int generated_bios_backend_linkable(const char* dir, const char* stem) {
+    char full[600], path[1200], descriptor[600], line[4096];
+    FILE* f;
+    int found = 0;
+    if ((size_t)snprintf(full, sizeof(full), "%s_full.c", stem) >= sizeof(full))
+        return 0;
+    if (!join_path(path, sizeof(path), dir, full) || !path_is_file(path))
+        return 0;
+    snprintf(full, sizeof(full), "%s_dispatch.c", stem);
+    if (!join_path(path, sizeof(path), dir, full))
+        return 0;
+    f = fopen(path, "r");
+    if (!f) return 0;
+    snprintf(descriptor, sizeof(descriptor), "%s_psx_bios_backend", stem);
+    while (fgets(line, sizeof(line), f)) {
+        if (strstr(line, descriptor)) { found = 1; break; }
+    }
+    fclose(f);
+    return found;
+}
+
+/* Does the configured framework hold a linkable requested BIOS backend?
+ *
+ * This used to probe two hardcoded names, OpenBIOS_dispatch.c and
+ * SCPH1001_dispatch.c. A port that pins a different image — via
+ * PSXRECOMP_BIOS_STEMS / game.toml recompiler.bios_config, as every wave-3
+ * kit does with SCPH5552 — emits its backend under that other stem, so the
+ * probe was permanently unsatisfied: Generate kept succeeding, the wizard
+ * kept reopening, and first-run setup could never complete. CMake supplies
+ * the requested stems; accept any linkable member, not an unrelated pair. */
+static int generated_has_bios_backend(const char* dir) {
+    const char* next = PSX_SETUP_BIOS_STEMS;
+    while (*next) {
+        char stem[512];
+        const char* end = strchr(next, '|');
+        size_t len = end ? (size_t)(end - next) : strlen(next);
+        if (len && len < sizeof(stem)) {
+            memcpy(stem, next, len);
+            stem[len] = 0;
+            if (generated_bios_backend_linkable(dir, stem)) return 1;
+        }
+        if (!end) break;
+        next = end + 1;
+    }
+    return 0;
+}
+
 static int bios_backends_missing(void) {
-    char openbios[1100], scph[1100];
-    if (!join_path(openbios, sizeof(openbios), g_project_root,
-                   "psxrecomp/generated/OpenBIOS_dispatch.c"))
+    char framework[1100], gen[1200];
+    if (!join_path(framework, sizeof(framework), g_project_root, PSX_SETUP_FRAMEWORK_REL) ||
+        !join_path(gen, sizeof(gen), framework, "generated"))
         return 1;
-    if (!join_path(scph, sizeof(scph), g_project_root,
-                   "psxrecomp/generated/SCPH1001_dispatch.c"))
-        return 1;
-    return !(path_is_file(openbios) || path_is_file(scph));
+    return !generated_has_bios_backend(gen);
 }
 
 int psxrecomp_codegen_host_sources_missing(
@@ -1158,7 +1293,7 @@ static void write_sidecar_near_exe(const char* near_exe, const char* name,
     write_line_file(path, value ? value : "");
 }
 
-/* IEEE CRC-32 (zlib / Ethernet) — SCPH-1001 identity for setup discovery. */
+/* IEEE CRC-32 (zlib / Ethernet) — retail BIOS identity for setup discovery. */
 static uint32_t host_crc32(const unsigned char* data, size_t len) {
     uint32_t crc = 0xFFFFFFFFu;
     size_t i, j;
@@ -1170,17 +1305,23 @@ static uint32_t host_crc32(const unsigned char* data, size_t len) {
     return ~crc;
 }
 
+/* Does this file match the retail image THIS build pins? A setup host has no
+ * linked backend to ask, so it consults psx_bios_known_images.h rather than
+ * assuming SCPH-1001 — which made every non-SCPH1001 kit reject a perfectly
+ * good dump. An unknown pinned stem adopts nothing and the player is asked. */
 static int retail_bios_file_ok_c(const char* path) {
+    const PsxKnownBiosImage* want = psx_expected_bios();
     FILE* f;
     long size;
     unsigned char* buf;
     uint32_t crc;
+    if (!want) return 0;
     if (!path || !path[0] || !path_is_file(path)) return 0;
     f = fopen(path, "rb");
     if (!f) return 0;
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return 0; }
     size = ftell(f);
-    if (size != 512 * 1024) { fclose(f); return 0; }
+    if (size != (long)want->size) { fclose(f); return 0; }
     if (fseek(f, 0, SEEK_SET) != 0) { fclose(f); return 0; }
     buf = (unsigned char*)malloc((size_t)size);
     if (!buf) { fclose(f); return 0; }
@@ -1192,22 +1333,22 @@ static int retail_bios_file_ok_c(const char* path) {
     fclose(f);
     crc = host_crc32(buf, (size_t)size);
     free(buf);
-    return crc == 0x37157331u; /* SCPH-1001 */
+    return crc == want->crc32;
 }
 
-/* Prefer a player-supplied SCPH1001 next to the project/exe for Generate.
- * Missing → leave empty (OpenBIOS). Does not override an explicit OpenBIOS. */
+/* Prefer a player-supplied dump of the pinned retail image next to the
+ * project/exe for Generate. Missing → leave empty (OpenBIOS). Does not
+ * override an explicit OpenBIOS. */
 static int discover_retail_bios_c(char* out, size_t cap) {
-    static const char* names[] = {
-        "SCPH1001.BIN", "scph1001.bin", "SCPH-1001.BIN", "scph-1001.bin",
-        "SCPH1001.bin", "scph1001.BIN",
-    };
+    char names[8][32];
+    int nnames = psx_known_bios_filenames(psx_expected_bios(), names, 8);
     static const char* subs[] = {
         "bios", "", "system", "firmware", "psxrecomp/bios", "psxrecomp-v4/bios",
     };
     char roots[3][1100];
     int nroots = 0;
     int r, s, n;
+    if (nnames <= 0) { out[0] = 0; return 0; }
     if (g_project_root[0]) {
         snprintf(roots[nroots], sizeof(roots[0]), "%s", g_project_root);
         ++nroots;
@@ -1231,7 +1372,7 @@ static int discover_retail_bios_c(char* out, size_t cap) {
                 } else {
                     snprintf(dir, sizeof(dir), "%s", walk);
                 }
-                for (n = 0; n < (int)(sizeof(names) / sizeof(names[0])); ++n) {
+                for (n = 0; n < nnames; ++n) {
                     char cand[1300];
                     if (!join_path(cand, sizeof(cand), dir, names[n])) continue;
                     if (!retail_bios_file_ok_c(cand)) continue;
@@ -1314,6 +1455,113 @@ static int resolve_bios_arg(char* out, size_t cap) {
 }
 
 /* bios_path NULL = leave bios.cfg untouched; "" = clear (OpenBIOS); else write. */
+/* ---- multi-disc roster (game.toml [game] discs) --------------------------
+ *
+ * The RUNTIME launcher has published a disc roster for a while, built from
+ * game.toml [game] discs. The SETUP host never did -- so on a first run the
+ * wizard could not know a title was a 3-disc set and asked for a single image.
+ * The other discs were then discovered missing much later, mid-game, at the
+ * first swap.
+ *
+ * Mirrors the runtime's rule: a roster is published only when there is more
+ * than one image, so single-disc titles see no behavioural change at all.
+ * Matches LNG_MAX_DISCS in recomp-ui; a longer list is clamped, exactly as the
+ * launcher clamps it. */
+#define PSX_HOST_MAX_DISCS 8
+
+static char g_disc_paths[PSX_HOST_MAX_DISCS][1024];
+/* What the PLAYER located in the wizard, as opposed to what game.toml already
+ * claimed. Generate writes these into game.toml so the runtime's hot-swap
+ * roster ([game] discs) describes the images this machine actually has. */
+static char g_wizard_discs[PSX_HOST_MAX_DISCS][1024];
+static int  g_wizard_disc_count;
+static RecompLauncherCDisc g_disc_roster[PSX_HOST_MAX_DISCS];
+static int  g_num_discs;
+
+static int host_path_is_absolute(const char* p) {
+    if (!p || !p[0]) return 0;
+    if (p[0] == '/' || p[0] == '\\') return 1;
+    return (p[1] == ':' && ((p[0] >= 'A' && p[0] <= 'Z') ||
+                            (p[0] >= 'a' && p[0] <= 'z')));
+}
+
+/* Minimal reader for one known key rather than a TOML library: this host shells
+ * out to Python for every real parse, and pulling in a parser to read a single
+ * array of strings would be a dependency for one line of config.
+ *
+ * Only [game] discs is recognised, and only string entries -- anything else in
+ * the file is skipped rather than guessed at. */
+static void load_game_toml_disc_roster(void) {
+    FILE* f;
+    char line[1600];
+    int in_game = 0, in_array = 0, i;
+
+    g_num_discs = 0;
+    if (!g_game_toml[0]) return;
+    f = fopen(g_game_toml, "rb");
+    if (!f) return;
+
+    while (fgets(line, sizeof(line), f)) {
+        const char* p = line;
+        while (*p == ' ' || *p == '\t') ++p;
+        if (!in_array) {
+            if (*p == '[') {                    /* section header */
+                in_game = (strncmp(p, "[game]", 6) == 0);
+                continue;
+            }
+            if (*p == '#' || !*p) continue;
+            if (!in_game) continue;
+            if (strncmp(p, "discs", 5) != 0) continue;
+            p += 5;
+            while (*p == ' ' || *p == '\t') ++p;
+            /* Guard against a longer key that merely starts with "discs". */
+            if (*p != '=') continue;
+            ++p;
+            in_array = 1;
+        }
+        for (; *p; ++p) {
+            if (*p == ']') { in_array = 0; break; }
+            if (*p == '#') break;               /* trailing comment */
+            if (*p != '"') continue;
+            {
+                const char* q = ++p;
+                size_t n;
+                while (*p && *p != '"') ++p;
+                if (!*p) break;                 /* unterminated -- give up */
+                n = (size_t)(p - q);
+                if (g_num_discs < PSX_HOST_MAX_DISCS &&
+                    n < sizeof(g_disc_paths[0])) {
+                    memcpy(g_disc_paths[g_num_discs], q, n);
+                    g_disc_paths[g_num_discs][n] = '\0';
+                    ++g_num_discs;
+                }
+            }
+        }
+        if (!in_array) break;
+    }
+    fclose(f);
+
+    /* game.toml may hold repo-relative paths. The launcher existence-checks
+     * what we publish, and its cwd is not necessarily the project root, so a
+     * relative entry would render as "missing" on a perfectly good install. */
+    for (i = 0; i < g_num_discs; ++i) {
+        char abs[1024];
+        if (host_path_is_absolute(g_disc_paths[i])) continue;
+        if (!g_project_root[0]) continue;
+        if (join_path(abs, sizeof(abs), g_project_root, g_disc_paths[i]))
+            snprintf(g_disc_paths[i], sizeof(g_disc_paths[i]), "%s", abs);
+    }
+
+    /* One image is not a set: leave GameInfo dark so nothing changes for
+     * single-disc titles. */
+    if (g_num_discs < 2) { g_num_discs = 0; return; }
+    for (i = 0; i < g_num_discs; ++i) {
+        g_disc_roster[i].number = i + 1;
+        g_disc_roster[i].label = NULL;   /* launcher formats "Disc N" */
+        g_disc_roster[i].path = g_disc_paths[i];
+    }
+}
+
 static int host_persist_setup(void* ctx, const char* rom_path,
                               const char* bios_path) {
     char path[1200];
@@ -1355,6 +1603,68 @@ static int host_persist_setup(void* ctx, const char* rom_path,
                           g_exe_basename))
                 write_sidecar_near_exe(build_exe, "disc.cfg", rom_path);
         }
+    }
+    return 0;
+}
+
+/* Multi-disc flush (RecompLauncherCGameInfo.persist_setup_discs).
+ *
+ * disc.cfg becomes one path per line, in disc order. Readers that take only
+ * the first line keep working and get disc 1 -- which is what they got before
+ * this existed -- so the format change is additive in the direction that
+ * matters. A slot the player has not located is written as an EMPTY line
+ * rather than skipped, so line N is always disc N and filling one in later
+ * cannot renumber the others.
+ *
+ * The BIOS half is delegated to host_persist_setup: passing rom_path NULL runs
+ * its bios.cfg logic and skips its single-path disc write, so the two entry
+ * points cannot drift on BIOS handling. */
+static int host_persist_setup_discs(void* ctx, const char* const* disc_paths,
+                                    int disc_count, const char* bios_path) {
+    char body[PSX_HOST_MAX_DISCS * 1030];
+    char path[1200];
+    size_t o = 0;
+    int i, any = 0;
+
+    host_persist_setup(ctx, NULL, bios_path);
+
+    if (!disc_paths || disc_count <= 0)
+        return 0;
+    if (disc_count > PSX_HOST_MAX_DISCS)
+        disc_count = PSX_HOST_MAX_DISCS;
+
+    g_wizard_disc_count = 0;
+    for (i = 0; i < disc_count; ++i) {
+        const char* d = disc_paths[i] ? disc_paths[i] : "";
+        snprintf(g_wizard_discs[i], sizeof(g_wizard_discs[i]), "%s", d);
+        if (d[0]) g_wizard_disc_count = i + 1;   /* trailing blanks are not a set */
+    }
+
+    body[0] = '\0';
+    for (i = 0; i < disc_count; ++i) {
+        const char* d = disc_paths[i] ? disc_paths[i] : "";
+        size_t n = strlen(d);
+        if (o + n + 2 >= sizeof(body))
+            return 0;
+        if (i) body[o++] = '\n';
+        if (n) { memcpy(body + o, d, n); o += n; any = 1; }
+        body[o] = '\0';
+    }
+    /* Nothing located: leave any existing disc.cfg alone rather than replacing
+     * it with a file of blank lines. */
+    if (!any)
+        return 0;
+
+    if (g_project_root[0] &&
+        join_path(path, sizeof(path), g_project_root, "disc.cfg"))
+        write_line_file(path, body);
+    write_line_file("disc.cfg", body);
+    if (g_exe_path[0])
+        write_sidecar_near_exe(g_exe_path, "disc.cfg", body);
+    if (g_build_dir[0]) {
+        char build_exe[1200];
+        if (join_path(build_exe, sizeof(build_exe), g_build_dir, g_exe_basename))
+            write_sidecar_near_exe(build_exe, "disc.cfg", body);
     }
     return 0;
 }
@@ -1496,33 +1806,73 @@ static void handle_progress_line(const char* line,
     }
 }
 
-#if defined(_WIN32)
+/* Last-lines capture so a failed CLI run can say WHY in the wizard, which has
+ * no console: the child's stderr shares the progress pipe, JSON progress rows
+ * contribute their "message", raw rows (compiler/traceback text) contribute
+ * as-is, and the most recent error-looking line is appended to err_msg. This
+ * is what turns "psxrecomp rebuild failed (exit 1)" into "… failed (exit 1):
+ * Could NOT find OpenGL (missing: OPENGL_INCLUDE_DIR)". */
+typedef struct {
+    char last[480];
+    char last_err[480];
+} CliTail;
+
+static int cli_tail_line_is_error(const char* s) {
+    return strstr(s, "rror") != NULL || strstr(s, "ailed") != NULL ||
+           strstr(s, "FAILED") != NULL || strstr(s, "Traceback") != NULL ||
+           strstr(s, "fatal") != NULL || strstr(s, "Fatal") != NULL;
+}
+
+static void cli_tail_note(CliTail* t, const char* line) {
+    char msg[480];
+    const char* rec = line;
+    int is_error_event = 0;
+    if (line[0] == '{') {
+        /* sdk_progress emits compact JSON: {"event":"error","message":…}. */
+        is_error_event = strstr(line, "\"event\":\"error\"") != NULL;
+        if (!json_get_string(line, "message", msg, sizeof(msg)))
+            return; /* structured row without text (e.g. result) */
+        rec = msg;
+    }
+    if (!rec[0])
+        return;
+    snprintf(t->last, sizeof(t->last), "%s", rec);
+    if (is_error_event || cli_tail_line_is_error(rec))
+        snprintf(t->last_err, sizeof(t->last_err), "%s", rec);
+}
+
+static void cli_fail_msg(char* err_msg, size_t err_cap, const char* fail_label,
+                         long code, const CliTail* t) {
+    const char* why = t->last_err[0] ? t->last_err : t->last;
+    if (code == 3) {
+        /* The CLI names the failing check (a digest mismatch, or a .chd it
+         * cannot read) and cli_tail_note has captured that line. A flat
+         * "wrong dump" contradicts it and sends players hunting a bad rip
+         * when the dump is fine. Keep the reason when there is one. */
+        if (why[0])
+            snprintf(err_msg, err_cap, "Disc verification failed: %s", why);
+        else
+            snprintf(err_msg, err_cap, "Disc verification failed (wrong dump).");
+        return;
+    }
+    if (why[0])
+        snprintf(err_msg, err_cap, "%s failed (exit %ld): %s", fail_label,
+                 code, why);
+    else
+        snprintf(err_msg, err_cap, "%s failed (exit %ld).", fail_label, code);
+}
+
 /* ---- Keeping the generator's own words ------------------------------------
  *
- * The child's output was read line by line, fed to the progress bar and then
- * DROPPED, so a failure surfaced as "psxrecomp generate failed (exit 1)" and
- * nothing else. The one line that identifies the fault -- a missing header, a
- * bad dump, a Python traceback -- flashed past in a console that closes with
- * the process. Two players hit a generate failure that could not be diagnosed
- * from their reports, and an earlier one only got anywhere because he happened
- * to read the flashing window and paste it.
- *
- * Keep the tail in memory for the error message, and write the whole run to a
- * log next to the game so it can be attached to a report.
+ * Every line of a CLI run is written to psxrecomp-build.log next to the game
+ * so a failure report can carry the full output; CliTail (above) supplies the
+ * one-line reason shown in the wizard. Both Windows and POSIX paths use it.
  */
-#define RC_TAIL_LINES 12
-#define RC_TAIL_LEN 400
-
-static char g_tail[RC_TAIL_LINES][RC_TAIL_LEN];
-static int g_tail_n;
-static int g_tail_head;
 static FILE* g_run_log;
 
 static void rc_log_open(const char* label) {
     char path[1200];
     if (g_run_log) { fclose(g_run_log); g_run_log = NULL; }
-    g_tail_n = 0;
-    g_tail_head = 0;
     if (!g_project_root[0]) return;
     if (!join_path(path, sizeof(path), g_project_root, "psxrecomp-build.log"))
         return;
@@ -1534,39 +1884,26 @@ static void rc_log_open(const char* label) {
 }
 
 static void rc_log_line(const char* line) {
-    if (g_run_log) {
-        fputs(line, g_run_log);
-        fputc('\n', g_run_log);
-        fflush(g_run_log);
+    if (!g_run_log) return;
+    fputs(line, g_run_log);
+    fputc('\n', g_run_log);
+    fflush(g_run_log);
+}
+
+/* Close the run log; on failure point the error message at it. */
+static void rc_log_close(char* err_msg, size_t err_cap) {
+    if (!g_run_log) return;
+    fclose(g_run_log);
+    g_run_log = NULL;
+    if (err_msg) {
+        size_t len = strlen(err_msg);
+        if (len + 2 < err_cap)
+            snprintf(err_msg + len, err_cap - len,
+                     "\n\nFull log: psxrecomp-build.log next to the game.");
     }
-    if (!line[0]) return;
-    snprintf(g_tail[g_tail_head], RC_TAIL_LEN, "%s", line);
-    g_tail_head = (g_tail_head + 1) % RC_TAIL_LINES;
-    if (g_tail_n < RC_TAIL_LINES) g_tail_n++;
 }
 
-static void rc_log_close(void) {
-    if (g_run_log) { fclose(g_run_log); g_run_log = NULL; }
-}
-
-/* Append the most recent output to an error message, newest last. */
-static void rc_append_tail(char* err_msg, size_t err_cap) {
-    size_t len = strlen(err_msg);
-    int i;
-    if (g_tail_n <= 0) return;
-    snprintf(err_msg + len, err_cap - len, "\n\nLast output:");
-    for (i = 0; i < g_tail_n; ++i) {
-        int idx = (g_tail_head - g_tail_n + i + RC_TAIL_LINES) % RC_TAIL_LINES;
-        len = strlen(err_msg);
-        if (len + 4 >= err_cap) break;
-        snprintf(err_msg + len, err_cap - len, "\n  %s", g_tail[idx]);
-    }
-    len = strlen(err_msg);
-    if (len + 2 < err_cap)
-        snprintf(err_msg + len, err_cap - len,
-                 "\n\nFull log: psxrecomp-build.log next to the game.");
-}
-
+#if defined(_WIN32)
 static int run_cli_win(const char* cmdline,
                        RecompLauncherCPrepareProgressFn on_progress,
                        void* progress_ctx, char* err_msg, size_t err_cap,
@@ -1589,7 +1926,9 @@ static int run_cli_win(const char* cmdline,
     si.cb = sizeof(si);
     si.dwFlags = STARTF_USESTDHANDLES;
     si.hStdOutput = wr;
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+    /* stderr shares the pipe: Python tracebacks and raw tool output feed the
+     * CliTail capture instead of vanishing (the wizard has no console). */
+    si.hStdError = wr;
     si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
 
     char mutable_cmd[4096];
@@ -1608,6 +1947,8 @@ static int run_cli_win(const char* cmdline,
     char line[16384];
     size_t line_len = 0;
     DWORD n = 0;
+    CliTail tail;
+    memset(&tail, 0, sizeof(tail));
     while (ReadFile(rd, buf, sizeof(buf), &n, NULL) && n > 0) {
         for (DWORD i = 0; i < n; ++i) {
             char c = buf[i];
@@ -1616,6 +1957,7 @@ static int run_cli_win(const char* cmdline,
                 line[line_len] = '\0';
                 rc_log_line(line);
                 handle_progress_line(line, on_progress, progress_ctx);
+                cli_tail_note(&tail, line);
                 line_len = 0;
                 continue;
             }
@@ -1627,6 +1969,7 @@ static int run_cli_win(const char* cmdline,
         line[line_len] = '\0';
         rc_log_line(line);
         handle_progress_line(line, on_progress, progress_ctx);
+        cli_tail_note(&tail, line);
     }
     CloseHandle(rd);
     WaitForSingleObject(pi.hProcess, INFINITE);
@@ -1634,14 +1977,9 @@ static int run_cli_win(const char* cmdline,
     GetExitCodeProcess(pi.hProcess, &code);
     CloseHandle(pi.hThread);
     CloseHandle(pi.hProcess);
-    if (code == 0) { rc_log_close(); return 1; }
-    if (code == 3)
-        snprintf(err_msg, err_cap, "Disc verification failed (wrong dump).");
-    else
-        snprintf(err_msg, err_cap, "%s failed (exit %lu).", fail_label,
-                 (unsigned long)code);
-    rc_append_tail(err_msg, err_cap);
-    rc_log_close();
+    if (code == 0) { rc_log_close(NULL, 0); return 1; }
+    cli_fail_msg(err_msg, err_cap, fail_label, (long)code, &tail);
+    rc_log_close(err_msg, err_cap);
     return 0;
 }
 #else
@@ -1659,6 +1997,9 @@ static int run_cli_posix(char* const argv[],
     posix_spawn_file_actions_init(&actions);
     posix_spawn_file_actions_addclose(&actions, pipefd[0]);
     posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDOUT_FILENO);
+    /* stderr shares the pipe: Python tracebacks and raw tool output feed the
+     * CliTail capture instead of vanishing (the wizard has no console). */
+    posix_spawn_file_actions_adddup2(&actions, pipefd[1], STDERR_FILENO);
     posix_spawn_file_actions_addclose(&actions, pipefd[1]);
 
     pid_t pid = 0;
@@ -1680,12 +2021,15 @@ static int run_cli_posix(char* const argv[],
         return 0;
     }
     char line[16384];
+    CliTail tail;
+    memset(&tail, 0, sizeof(tail));
     while (fgets(line, sizeof(line), out)) {
         size_t n = strlen(line);
         while (n && (line[n - 1] == '\n' || line[n - 1] == '\r'))
             line[--n] = '\0';
         rc_log_line(line);
         handle_progress_line(line, on_progress, progress_ctx);
+        cli_tail_note(&tail, line);
     }
     fclose(out);
 
@@ -1695,20 +2039,16 @@ static int run_cli_posix(char* const argv[],
         return 0;
     }
     int code = WIFEXITED(status) ? WEXITSTATUS(status) : 1;
-    if (code == 0) { rc_log_close(); return 1; }
-    if (code == 3)
-        snprintf(err_msg, err_cap, "Disc verification failed (wrong dump).");
-    else
-        snprintf(err_msg, err_cap, "%s failed (exit %d).", fail_label, code);
-    rc_append_tail(err_msg, err_cap);
-    rc_log_close();
+    if (code == 0) { rc_log_close(NULL, 0); return 1; }
+    cli_fail_msg(err_msg, err_cap, fail_label, (long)code, &tail);
+    rc_log_close(err_msg, err_cap);
     return 0;
 }
 #endif
 
 /* ---- Host-native toolchain install (no Store Python AppData redirect) ---- */
 
-static const char* k_tc_repo = "TechnicallyComputers/retcomm-toolchains";
+static const char* k_tc_repo = "RetroPortingToolKit/RetroPorting-Toolchains";
 /* The toolchain is pinned: a fixed release tag plus the SHA-256 of the asset,
  * so a compromised or replaced upstream release cannot reach players. The
  * Windows hash was verified against a locally downloaded copy, not just the
@@ -1852,14 +2192,25 @@ static const char* toolchain_zip_asset_name(void) {
 #endif
 }
 
-/* Optional floor via RETCOMM_TOOLCHAIN_MIN_VERSION. Wizard/default is empty:
- * download GitHub /releases/latest and accept any usable pack (no per-title
- * version pinning to maintain). */
+/* Framework floor for accepted packs, not a per-title pin. v1.0.14 is the
+ * first cmake-clang-v1 with the Linux build sysroot; older cached packs
+ * compile against host headers (absent on stock SteamOS) and mis-link after a
+ * pack upgrade (__isoc23_strtoul). The cache is otherwise accepted forever
+ * once any cmake runs, so the floor is what makes a stale pre-sysroot pack
+ * get replaced. RETCOMM_TOOLCHAIN_MIN_VERSION overrides in either direction;
+ * "0" / "off" / "none" disables the floor (pre-floor behavior). Mirrors
+ * tools/toolchain_pack.py default_min_version(). */
+#define TOOLCHAIN_DEFAULT_MIN_VERSION "1.0.14"
+
 static const char* toolchain_min_version(void) {
     const char* env = getenv("RETCOMM_TOOLCHAIN_MIN_VERSION");
-    if (env && env[0])
+    if (env && env[0]) {
+        if (strcmp(env, "0") == 0 || ascii_strcasecmp(env, "off") == 0 ||
+            ascii_strcasecmp(env, "none") == 0)
+            return "";
         return env;
-    return "";
+    }
+    return TOOLCHAIN_DEFAULT_MIN_VERSION;
 }
 
 /* Parse leading dotted integers from a version / tag (optional leading 'v'). */
@@ -2921,6 +3272,44 @@ static int cmake_path_runs(const char* cmake_path) {
     return run_cmd_exit_zero(cmd);
 }
 
+#if !defined(_WIN32)
+/* Native release kits probe host tools; setup never installs system packages. */
+static int posix_command_runs(const char* command) {
+    char cmd[1600];
+    if (!command || !command[0])
+        return 0;
+    snprintf(cmd, sizeof(cmd), "\"%s\" --version >/dev/null 2>&1", command);
+    return run_cmd_exit_zero(cmd);
+}
+
+static int host_system_toolchain_ready(void) {
+    char python[1200], tool[1200];
+#if defined(__APPLE__)
+    /* Avoid xcrun prompting to install tools during a readiness check. */
+    if (!run_cmd_exit_zero("xcode-select -p >/dev/null 2>&1"))
+        return 0;
+#endif
+    if (!find_on_path("cmake", g_cmake, sizeof(g_cmake)) ||
+        !posix_command_runs(g_cmake))
+        return 0;
+    if (!(find_on_path("python3", python, sizeof(python)) ||
+          find_on_path("python", python, sizeof(python))) ||
+        !posix_command_runs(python))
+        return 0;
+    if (!find_on_path("ninja", tool, sizeof(tool)) || !posix_command_runs(tool))
+        return 0;
+    if (!(find_on_path("cc", tool, sizeof(tool)) ||
+          find_on_path("gcc", tool, sizeof(tool)) ||
+          find_on_path("clang", tool, sizeof(tool))) || !posix_command_runs(tool))
+        return 0;
+    if (!(find_on_path("c++", tool, sizeof(tool)) ||
+          find_on_path("g++", tool, sizeof(tool)) ||
+          find_on_path("clang++", tool, sizeof(tool))) || !posix_command_runs(tool))
+        return 0;
+    return 1;
+}
+#endif
+
 /* True when pack bin/ can compile+link a tiny C program (catches broken
  * ld.lld / missing libicuuc.so.* etc. that cmake --version still passes). */
 static int toolchain_bin_compiler_works(const char* bin) {
@@ -2938,8 +3327,17 @@ static int toolchain_bin_compiler_works(const char* bin) {
             return 0;
     }
 #else
-    if (!join_path(clang, sizeof(clang), bin, "clang") || !path_is_file(clang))
+    if (!join_path(clang, sizeof(clang), bin, "clang") || !path_is_file(clang)) {
+#  if defined(__APPLE__)
+        /* The macOS pack (cmake-clang-v1-macos-universal) ships CMake, Ninja,
+         * ccache and Python only; compiling uses the system toolchain from
+         * Apple's Command Line Tools, checked by macos_system_compiler_works.
+         * A pack without clang is the normal macOS layout, not a broken one. */
+        return 1;
+#  else
         return 0;
+#  endif
+    }
     if (!join_path(lld, sizeof(lld), bin, "ld.lld") || !path_is_file(lld))
         return 0;
 #endif
@@ -2991,6 +3389,50 @@ static int toolchain_bin_compiler_works(const char* bin) {
     unlink(exe);
 #endif
     return ok;
+}
+
+#if defined(__APPLE__)
+/* True when Apple's Command Line Tools are installed and /usr/bin/clang can
+ * compile and link a tiny program. xcode-select runs first so a machine
+ * without the CLT gets a repair note instead of the xcrun install prompt on
+ * every wizard refresh. */
+static int macos_system_compiler_works(void) {
+    char src[256], exe[256], cmd[1024];
+    FILE* f;
+    int ok;
+    if (!run_cmd_exit_zero("xcode-select -p >/dev/null 2>&1"))
+        return 0;
+    snprintf(src, sizeof(src), "/tmp/psxrecomp-cc-probe-%d.c", (int)getpid());
+    snprintf(exe, sizeof(exe), "/tmp/psxrecomp-cc-probe-%d", (int)getpid());
+    f = fopen(src, "wb");
+    if (!f)
+        return 0;
+    fputs("int main(void){return 0;}\n", f);
+    fclose(f);
+    snprintf(cmd, sizeof(cmd), "/usr/bin/clang \"%s\" -o \"%s\" >/dev/null 2>&1",
+             src, exe);
+    ok = run_cmd_exit_zero(cmd);
+    unlink(src);
+    unlink(exe);
+    return ok;
+}
+#endif
+
+/* Pack health says nothing about the macOS system compiler (see above), so
+ * readiness checks it separately and explains how to fix it. The pack itself
+ * is left alone: a missing compiler must never delete a good download. */
+static int host_system_compiler_ready(void) {
+#if defined(__APPLE__)
+    if (macos_system_compiler_works())
+        return 1;
+    snprintf(g_tc_repair_note, sizeof(g_tc_repair_note),
+             "Apple's Command Line Tools are required to build the game. "
+             "Open Terminal, run: xcode-select --install  then reopen this "
+             "app.");
+    return 0;
+#else
+    return 1;
+#endif
 }
 
 static int toolchain_bin_is_healthy(const char* bin) {
@@ -3171,13 +3613,16 @@ static int host_toolchain_is_ready(void) {
     if (!g_project_root[0])
         return 0;
     g_tc_repair_note[0] = '\0';
+#if !defined(_WIN32)
+    return host_system_toolchain_ready();
+#endif
     migrate_legacy_psxrecomp_toolchain();
     /* Wizard open: drop broken latest/ before treating the pack as ready. */
     heal_broken_toolchain_pointers();
     for (attempt = 0; attempt < 3; ++attempt) {
         activate_toolchain_path();
         if (host_portable_cmake_ready())
-            return 1;
+            return host_system_compiler_ready();
         if (!g_toolchain_bin[0])
             break;
         discard_unhealthy_active_toolchain();
@@ -3232,6 +3677,9 @@ static int host_toolchain_update_available(char* local_ver, size_t local_cap,
         local_ver[0] = '\0';
     if (remote_ver && remote_cap)
         remote_ver[0] = '\0';
+#if !defined(_WIN32)
+    return 0;
+#endif
     if (skip && skip[0] && skip[0] != '0')
         return 0;
     if (!g_project_root[0])
@@ -3249,7 +3697,7 @@ static int host_toolchain_update_available(char* local_ver, size_t local_cap,
 
 /* Download or offline-install cmake-clang-v1 (wizard page 0 / rebuild fallback).
  * Prefer host-native curl/tar so Microsoft Store Python cannot redirect the
- * unpack into Packages\\...\\LocalCache. Installs into the shared RetComM
+ * unpack into Packages\\...\\LocalCache. Installs into the shared Retro
  * cache: %LOCALAPPDATA%/retcomm/toolchains/cmake-clang-v1/…
  * Broken latest/ stamps are healed, then GitHub /releases/latest is fetched.
  *
@@ -3262,6 +3710,16 @@ static int host_ensure_toolchain_with_progress(
         snprintf(err_msg, err_cap, "Project root is not available.");
         return 0;
     }
+#if !defined(_WIN32)
+    if (on_progress)
+        on_progress(progress_ctx, 0.02f, "Checking native build tools…");
+    if (host_system_toolchain_ready())
+        return 1;
+    snprintf(err_msg, err_cap,
+             "Native build tools are missing. Install CMake, Ninja, Python 3, "
+             "and C/C++ compilers with your package manager, then check tools again.");
+    return 0;
+#endif
     migrate_legacy_psxrecomp_toolchain();
     activate_toolchain_path();
     if (!force && host_portable_cmake_ready())
@@ -3352,6 +3810,248 @@ static int host_ensure_toolchain(RecompLauncherCPrepareProgressFn on_progress,
                                                on_progress, progress_ctx);
 }
 
+/* Record the located set in game.toml before Generate reads it.
+ *
+ * disc.cfg is the mounted-image cache and the runtime takes only its first
+ * line; the hot-swap roster is built from game.toml [game] discs. So the
+ * wizard's picks reach the roster only by being written there -- which is
+ * exactly what the Retro path does by running probe_disc.py per image and
+ * verify_disc_set.py over the results.
+ *
+ * update_disc_set.py performs the same probe/verify and then edits ONLY the
+ * disc keys, leaving the project's hand-tuned sections and comments alone. It
+ * is a no-op when game.toml already names these images, so a re-run of the
+ * wizard does not churn the file.
+ *
+ * A failure here is reported and non-fatal: Generate itself only needs the
+ * boot image, and refusing to build because disc 3 could not be probed would
+ * be a worse outcome than building with a single-disc roster. */
+static void host_update_disc_set(RecompLauncherCPrepareProgressFn on_progress,
+                                 void* progress_ctx) {
+    char script[1200];
+    char cmd[4096];
+    const char* cut;
+    size_t n;
+    int i, off;
+
+    if (g_wizard_disc_count < 2 || !g_python[0] || !g_cli_path[0] ||
+        !g_game_toml[0])
+        return;
+
+    /* tools/ sits beside psxrecomp_cli.py, wherever the submodule lives. */
+    cut = strrchr(g_cli_path, '/');
+#if defined(_WIN32)
+    {
+        const char* b = strrchr(g_cli_path, '\\');
+        if (b && (!cut || b > cut)) cut = b;
+    }
+#endif
+    if (!cut) return;
+    n = (size_t)(cut - g_cli_path);
+    if (n >= sizeof(script)) return;
+    memcpy(script, g_cli_path, n);
+    script[n] = '\0';
+    if ((size_t)snprintf(script + n, sizeof(script) - n,
+                         "/tools/new_project_layout/update_disc_set.py") >=
+        sizeof(script) - n)
+        return;
+    if (!path_is_file(script))
+        return;   /* older SDK checkout: nothing to run, single-disc as before */
+
+    off = snprintf(cmd, sizeof(cmd), "\"%s\" \"%s\" --game-toml \"%s\"",
+                   g_python, script, g_game_toml);
+    for (i = 0; i < g_wizard_disc_count; ++i) {
+        if (!g_wizard_discs[i][0])
+            return;   /* a gap in the middle would renumber the set */
+        if (off < 0 || (size_t)off >= sizeof(cmd))
+            return;
+        off += snprintf(cmd + off, sizeof(cmd) - (size_t)off, " \"%s\"",
+                        g_wizard_discs[i]);
+    }
+    if (off < 0 || (size_t)off >= sizeof(cmd))
+        return;
+
+    if (on_progress)
+        on_progress(progress_ctx, 0.03f, "Recording the disc set…");
+    if (!run_cmd_exit_zero(cmd) && on_progress)
+        on_progress(progress_ctx, 0.03f,
+                    "Could not record every disc — continuing with the boot disc.");
+}
+
+/* ---- self-build loop breaker + preflight ------------------------------- */
+
+#define HOST_LAST_GENERATE_SIDECAR ".psxrecomp_last_generate"
+/* A wizard loop iterates in minutes; a recent stamp with sources still
+ * missing means "generate worked but nothing gates on its output" — a
+ * config skew — not a user who wiped generated/ last week. */
+#define HOST_LOOP_BREAKER_WINDOW_SECS (6 * 60 * 60)
+
+static char g_loop_breaker_note[1024];
+
+/* Comma-join the *_dispatch.c basenames under <root>/generated. */
+static void list_generated_dispatch(char* out, size_t cap) {
+    char dir[1100];
+    size_t used = 0;
+    out[0] = '\0';
+    if (!join_path(dir, sizeof(dir), g_project_root, "generated"))
+        return;
+#if defined(_WIN32)
+    {
+        char pat[1200];
+        WIN32_FIND_DATAA fd;
+        HANDLE h;
+        if (!join_path(pat, sizeof(pat), dir, "*_dispatch.c"))
+            return;
+        h = FindFirstFileA(pat, &fd);
+        if (h == INVALID_HANDLE_VALUE)
+            return;
+        do {
+            int n = snprintf(out + used, cap - used, "%s%s",
+                             used ? ", " : "", fd.cFileName);
+            if (n <= 0 || (size_t)n >= cap - used)
+                break;
+            used += (size_t)n;
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+#else
+    {
+        static const char suffix[] = "_dispatch.c";
+        DIR* d = opendir(dir);
+        struct dirent* e;
+        if (!d)
+            return;
+        while ((e = readdir(d)) != NULL) {
+            size_t len = strlen(e->d_name);
+            int n;
+            if (len <= sizeof(suffix) - 1 ||
+                strcmp(e->d_name + len - (sizeof(suffix) - 1), suffix) != 0)
+                continue;
+            n = snprintf(out + used, cap - used, "%s%s",
+                         used ? ", " : "", e->d_name);
+            if (n <= 0 || (size_t)n >= cap - used)
+                break;
+            used += (size_t)n;
+        }
+        closedir(d);
+    }
+#endif
+}
+
+static void host_record_generate_ok(void) {
+    char sidecar[1200], line[32];
+    if (!join_path(sidecar, sizeof(sidecar), g_project_root,
+                   HOST_LAST_GENERATE_SIDECAR))
+        return;
+    snprintf(line, sizeof(line), "%lld", (long long)time(NULL));
+    write_line_file(sidecar, line);
+}
+
+static void host_clear_generate_stamp(void) {
+    char sidecar[1200];
+    if (join_path(sidecar, sizeof(sidecar), g_project_root,
+                  HOST_LAST_GENERATE_SIDECAR))
+        remove(sidecar);
+}
+
+/* apply() consults this when the wizard is about to reopen because sources
+ * are missing. If a generate succeeded here recently, re-running it will
+ * loop — say exactly what is missing and what exists instead of silently
+ * re-prompting. Returns NULL when there is nothing to warn about. */
+static const char* host_loop_breaker_note(void) {
+    char sidecar[1200], line[64], found[512], marker_abs[1200];
+    long long then, now;
+    const char* marker_rel;
+    const char* cause;
+    int game_missing, bios_missing;
+    if (!join_path(sidecar, sizeof(sidecar), g_project_root,
+                   HOST_LAST_GENERATE_SIDECAR))
+        return NULL;
+    if (!read_line_file(sidecar, line, sizeof(line)))
+        return NULL;
+    then = strtoll(line, NULL, 10);
+    now = (long long)time(NULL);
+    if (then <= 0 || now < then || now - then > HOST_LOOP_BREAKER_WINDOW_SECS)
+        return NULL;
+    marker_rel = cfg_or(g_cfg->gen_marker_relpath,
+                        "generated/SLUS_011.89_dispatch.c");
+    game_missing =
+        !join_path(marker_abs, sizeof(marker_abs), g_project_root,
+                   marker_rel) ||
+        !path_is_file(marker_abs);
+    bios_missing = bios_backends_missing();
+    if (!game_missing && !bios_missing)
+        return NULL;
+    list_generated_dispatch(found, sizeof(found));
+    /* Each branch has its own cause, so do not assert a single one. A missing
+     * game dispatch really does point at disagreeing boot-EXE names. Missing
+     * BIOS backends do not: they mean Generate never emitted them, normally
+     * because no retail BIOS was available to emit them from. Blaming
+     * boot-EXE names for that sent players after the wrong thing. */
+    if (game_missing)
+        cause = "please report this to the port maintainer: the project's "
+                "boot-EXE names disagree";
+    else
+        cause = "Generate produced the game code but no BIOS backend, which "
+                "normally means it had no retail BIOS to work from. Select "
+                "the PlayStation BIOS dump this port requires (named in the "
+                "README; it must be exactly 512 KB) in the launcher, then "
+                "run Generate again";
+    snprintf(g_loop_breaker_note, sizeof(g_loop_breaker_note),
+             "A Generate completed here recently, yet the launcher still "
+             "cannot find %s%s%s. generated/ contains: %s. Running Generate "
+             "again will very likely loop — %s.",
+             game_missing ? marker_rel : "",
+             (game_missing && bios_missing) ? " and " : "",
+             bios_missing ? "the BIOS backends under psxrecomp/generated/"
+                          : "",
+             found[0] ? found : "no *_dispatch.c at all",
+             cause);
+    fprintf(stderr, "psxrecomp-codegen: %s\n", g_loop_breaker_note);
+    return g_loop_breaker_note;
+}
+
+/* Generating into Explorer's temporary zip extraction (Windows) or an
+ * unwritable folder always ends badly — the output evaporates or never
+ * lands, and the wizard reopens forever. Refuse with instructions. */
+static int host_preflight_project_root(char* err_msg, size_t err_cap) {
+#if defined(_WIN32)
+    {
+        char tmp[MAX_PATH];
+        DWORD n = GetTempPathA((DWORD)sizeof(tmp), tmp);
+        if (n > 0 && n < (DWORD)sizeof(tmp) &&
+            _strnicmp(g_project_root, tmp, strlen(tmp)) == 0) {
+            snprintf(err_msg, err_cap,
+                     "This game is running from a temporary folder (%s), "
+                     "usually because the downloaded ZIP was opened without "
+                     "extracting it. Extract the whole ZIP to a normal "
+                     "folder, then run the game from there.",
+                     g_project_root);
+            return 0;
+        }
+    }
+#endif
+    {
+        char probe[1200];
+        FILE* f;
+        if (!join_path(probe, sizeof(probe), g_project_root,
+                       ".psxrecomp_write_probe"))
+            return 1; /* path too long — let the CLI surface the real error */
+        f = fopen(probe, "wb");
+        if (!f) {
+            snprintf(err_msg, err_cap,
+                     "The install folder is not writable: %s. Move the game "
+                     "folder somewhere writable (e.g. your user folder) or "
+                     "fix its permissions, then retry.",
+                     g_project_root);
+            return 0;
+        }
+        fclose(f);
+        remove(probe);
+    }
+    return 1;
+}
+
 static int host_prepare_generate(const char* source_path, char* out_path,
                                  size_t out_cap, char* err_msg, size_t err_cap,
                                  RecompLauncherCPrepareProgressFn on_progress,
@@ -3364,6 +4064,8 @@ static int host_prepare_generate(const char* source_path, char* out_path,
         snprintf(err_msg, err_cap, "No disc selected.");
         return 0;
     }
+    if (!host_preflight_project_root(err_msg, err_cap))
+        return 0;
     activate_toolchain_path();
     if (!find_python(g_python, sizeof(g_python))) {
         /* First-run / pruned cache: page 0 normally installed the pack; heal. */
@@ -3379,6 +4081,9 @@ static int host_prepare_generate(const char* source_path, char* out_path,
     }
     if (on_progress)
         on_progress(progress_ctx, 0.02f, "Starting psxrecomp generate…");
+
+    /* Must precede the CLI: generate reads game.toml. */
+    host_update_disc_set(on_progress, progress_ctx);
 
     /* Hand the CLI the launcher's staged disc + BIOS. Empty g_wizard_bios means
      * OpenBIOS unless setup can adopt a retail dump beside the install. */
@@ -3412,19 +4117,31 @@ static int host_prepare_generate(const char* source_path, char* out_path,
     fprintf(stderr, "psxrecomp-codegen: generate disc=%s bios=%s\n", source_path,
             have_bios ? bios_path : "(OpenBIOS)");
 
+    /* The exact dispatch filename this host (and CMakeLists GEN_MARKER) will
+     * gate on later. Handing it to generate makes a boot-exe name skew fail
+     * there, loudly, instead of surfacing as an endless setup-wizard loop. */
+    const char* marker_rel =
+        cfg_or(g_cfg->gen_marker_relpath, "generated/SLUS_011.89_dispatch.c");
+    const char* marker_name = marker_rel;
+    for (const char* p = marker_rel; *p; ++p)
+        if (*p == '/' || *p == '\\')
+            marker_name = p + 1;
+
 #if defined(_WIN32)
     char cmdline[4096];
     if (have_bios) {
         snprintf(cmdline, sizeof(cmdline),
                  "\"%s\" \"%s\" generate --project-root \"%s\" --config \"%s\" "
-                 "--disc \"%s\" --bios \"%s\" --json-progress",
+                 "--disc \"%s\" --bios \"%s\" --gen-marker \"%s\" "
+                 "--json-progress",
                  g_python, g_cli_path, g_project_root, g_game_toml, source_path,
-                 bios_path);
+                 bios_path, marker_name);
     } else {
         snprintf(cmdline, sizeof(cmdline),
                  "\"%s\" \"%s\" generate --project-root \"%s\" --config \"%s\" "
-                 "--disc \"%s\" --json-progress",
-                 g_python, g_cli_path, g_project_root, g_game_toml, source_path);
+                 "--disc \"%s\" --gen-marker \"%s\" --json-progress",
+                 g_python, g_cli_path, g_project_root, g_game_toml, source_path,
+                 marker_name);
     }
     rc_log_open("psxrecomp generate");
     if (!run_cli_win(cmdline, on_progress, progress_ctx, err_msg, err_cap,
@@ -3446,6 +4163,8 @@ static int host_prepare_generate(const char* source_path, char* out_path,
         argv[argc++] = "--bios";
         argv[argc++] = bios_path;
     }
+    argv[argc++] = "--gen-marker";
+    argv[argc++] = (char*)marker_name;
     argv[argc++] = "--json-progress";
     argv[argc] = NULL;
     rc_log_open("psxrecomp generate");
@@ -3453,6 +4172,10 @@ static int host_prepare_generate(const char* source_path, char* out_path,
                        "psxrecomp generate"))
         return 0;
 #endif
+
+    /* Stamp the success so apply() can tell "generate worked but the
+     * launcher still cannot see its output" apart from a plain first run. */
+    host_record_generate_ok();
 
     snprintf(out_path, out_cap, "%s", source_path);
     if (on_progress)
@@ -3511,6 +4234,14 @@ static int write_windows_deferred_rebuild_helper(int force_pgo,
     bat_write_set(f, "EXE_BASE", g_exe_basename);
     bat_write_set(f, "EXE", g_exe_path);
     bat_write_set(f, "DISPLAY", g_display);
+    {
+        /* Post-build sanity: the dispatch file the launcher will gate on. */
+        char marker_abs[1200];
+        if (join_path(marker_abs, sizeof(marker_abs), g_project_root,
+                      cfg_or(g_cfg->gen_marker_relpath,
+                             "generated/SLUS_011.89_dispatch.c")))
+            bat_write_set(f, "GEN_MARKER", marker_abs);
+    }
     if (force_pgo && disc_path && disc_path[0])
         bat_write_set(f, "DISC", disc_path);
     if (g_toolchain_bin[0])
@@ -3557,9 +4288,41 @@ static int write_windows_deferred_rebuild_helper(int force_pgo,
             "  pause\r\n"
             "  exit /b 1\r\n"
             ")\r\n"
+            /* %EXE% was guessed before the build; runtime.cmake publishes the
+             * OUTPUT_NAME it really used, which wins the moment a title is
+             * renamed. Then verify game code + exe exist before relaunching,
+             * so a setup-host build stops here with a message instead of
+             * reopening the wizard in a loop. */
+            "set \"EXE_FINAL=%%EXE%%\"\r\n"
+            "set \"PUBLISHED=\"\r\n"
+            "if exist \"%%BUILD_DIR%%\\psxrecomp_exe_name-%%TARGET%%.txt\" "
+            "set /p PUBLISHED=<\"%%BUILD_DIR%%\\psxrecomp_exe_name-%%TARGET%%.txt\"\r\n"
+            "if defined PUBLISHED if exist \"%%BUILD_DIR%%\\%%PUBLISHED%%.exe\" "
+            "set \"EXE_FINAL=%%BUILD_DIR%%\\%%PUBLISHED%%.exe\"\r\n"
+            /* Path-bearing messages sit outside ( ) blocks: cmd expands
+             * %VAR% when it parses a block, so a ")" in an install folder
+             * such as "... (1)" would close the block early. */
+            "if defined GEN_MARKER if not exist \"%%GEN_MARKER%%\" goto no_gen\r\n"
+            "if not exist \"%%EXE_FINAL%%\" goto no_exe\r\n"
             "echo Starting %%DISPLAY%%...\r\n"
-            "start \"\" /D \"%%ROOT%%\" \"%%EXE%%\" --launcher\r\n"
-            "endlocal\r\n");
+            "start \"\" /D \"%%ROOT%%\" \"%%EXE_FINAL%%\" --launcher\r\n"
+            "endlocal\r\n"
+            "exit /b 0\r\n"
+            ":no_gen\r\n"
+            "echo.\r\n"
+            "echo Build finished but the generated game code is missing:\r\n"
+            "echo   %%GEN_MARKER%%\r\n"
+            "echo Launching now would reopen setup in a loop. Please report\r\n"
+            "echo this to the port maintainer: the boot-EXE name in\r\n"
+            "echo game.toml disagrees with GEN_MARKER in CMakeLists.txt.\r\n"
+            "pause\r\n"
+            "exit /b 1\r\n"
+            ":no_exe\r\n"
+            "echo.\r\n"
+            "echo Build finished but the game executable is missing:\r\n"
+            "echo   %%EXE_FINAL%%\r\n"
+            "pause\r\n"
+            "exit /b 1\r\n");
     fclose(f);
     return 1;
 }
@@ -3719,12 +4482,7 @@ static int host_self_exe_path(char* out, size_t cap) {
             snprintf(out, cap, "%s", appimg);
             return 1;
         }
-        char* rp = realpath("/proc/self/exe", NULL);
-        if (!rp)
-            return 0;
-        snprintf(out, cap, "%s", rp);
-        free(rp);
-        return out[0] != '\0';
+        return host_posix_exe_path(out, cap);
     }
 #endif
 }
@@ -3754,9 +4512,132 @@ static int host_paths_same_file(const char* a, const char* b) {
 #endif
 }
 
+/* --setup-selfcheck: report what the setup host believes about this tree, as
+ * JSON on stdout, then exit. 0 = generated sources complete, 2 = the wizard
+ * would reopen, 1 = could not tell (no project root).
+ *
+ * This exists because the decision layer -- "are the generated sources
+ * present?" -- had no headless entry point. Disc selection, BIOS selection and
+ * generation were already scriptable via psxrecomp_cli.py; the verdict on
+ * whether setup is DONE was reachable only by clicking through the wizard, so
+ * nothing in CI could assert it. A stem mismatch there shipped a first-run
+ * loop on 26 titles before anyone noticed.
+ *
+ * Deliberately ahead of the PSX_HAS_GAME_DISPATCH early return below, so a
+ * product build answers too. Every title already calls this function with
+ * argc/argv, so no per-title change is needed to gain the flag. */
+static void host_json_str(const char* s) {
+    putchar('"');
+    for (; s && *s; ++s) {
+        if (*s == '\\' || *s == '"')
+            putchar('\\');
+        putchar(*s);
+    }
+    putchar('"');
+}
+
+static void host_selfcheck_or_return(const PsxrecompCodegenHostConfig* cfg,
+                                     int argc, char** argv) {
+    const PsxKnownBiosImage* want;
+    const char* marker_rel;
+    char marker_abs[1200];
+    int i, missing, game_ok, bios_ok;
+
+    for (i = 1; i < argc; ++i)
+        if (argv[i] && strcmp(argv[i], "--setup-selfcheck") == 0)
+            break;
+    if (i >= argc)
+        return;
+
+    if (!cfg || !cfg->cmake_target || !cfg->exe_basename) {
+        printf("{\"error\": \"no codegen host config linked\"}\n");
+        exit(1);
+    }
+    /* Sets g_cfg and g_project_root as a side effect. */
+    missing = psxrecomp_codegen_host_sources_missing(cfg);
+    if (!g_project_root[0]) {
+        printf("{\"error\": \"project root not found\"}\n");
+        exit(1);
+    }
+
+    marker_rel = cfg_or(cfg->gen_marker_relpath,
+                        "generated/SLUS_011.89_dispatch.c");
+    game_ok = join_path(marker_abs, sizeof(marker_abs), g_project_root,
+                        marker_rel) && path_is_file(marker_abs);
+    bios_ok = !bios_backends_missing();
+    want = psx_expected_bios();
+
+    printf("{\n");
+    printf("  \"display_name\": ");
+    host_json_str(cfg_or(cfg->display_name, "Game"));
+    printf(",\n  \"project_root\": ");
+    host_json_str(g_project_root);
+    printf(",\n  \"expected_bios_stem\": ");
+    host_json_str(PSX_EXPECTED_BIOS_STEM);
+    printf(",\n  \"expected_bios_id\": ");
+    host_json_str(want ? want->id : "");
+    printf(",\n  \"expected_bios_crc32\": ");
+    if (want) {
+        char crcbuf[16];
+        snprintf(crcbuf, sizeof(crcbuf), "0x%08X", want->crc32);
+        host_json_str(crcbuf);
+    } else {
+        printf("null");
+    }
+    printf(",\n  \"game_dispatch\": ");
+    host_json_str(marker_rel);
+    printf(",\n  \"game_dispatch_present\": %s", game_ok ? "true" : "false");
+    printf(",\n  \"bios_backends_present\": %s", bios_ok ? "true" : "false");
+    printf(",\n  \"sources_missing\": %s", missing ? "true" : "false");
+    /* Wave-5 F4: overlay_cache is the switch that makes the runtime initialise the
+     * overlay loader at all; without it every streamed overlay is interpreted. CI
+     * asserts this field so a title cannot ship silently without it again. */
+    {
+        char toml_abs[1200];
+        int overlay_cache = 0;
+        if (join_path(toml_abs, sizeof(toml_abs), g_project_root, "game.toml")) {
+            FILE* tf = fopen(toml_abs, "rb");
+            if (tf) {
+                char line[512];
+                while (fgets(line, sizeof(line), tf)) {
+                    const char* p = line;
+                    while (*p == ' ' || *p == '\t') ++p;
+                    if (strncmp(p, "overlay_cache", 13) == 0) {
+                        p += 13;
+                        while (*p == ' ' || *p == '\t') ++p;
+                        if (*p == '=') {
+                            ++p;
+                            while (*p == ' ' || *p == '\t') ++p;
+                            overlay_cache = strncmp(p, "true", 4) == 0;
+                        }
+                    }
+                }
+                fclose(tf);
+            }
+        }
+        printf(",\n  \"overlay_cache_configured\": %s", overlay_cache ? "true" : "false");
+    }
+    /* Build-tools readiness as wizard page 0 judges it, minus its cache
+     * healing: nothing is deleted or renamed here. toolchain_note carries the
+     * repair hint the wizard would show (e.g. missing Command Line Tools). */
+    {
+        int tc_ready;
+        g_tc_repair_note[0] = '\0';
+        activate_toolchain_path();
+        tc_ready = host_portable_cmake_ready() && host_system_compiler_ready();
+        printf(",\n  \"toolchain_ready\": %s", tc_ready ? "true" : "false");
+        printf(",\n  \"toolchain_note\": ");
+        host_json_str(g_tc_repair_note);
+    }
+    printf("\n}\n");
+    fflush(stdout);
+    exit(missing ? 2 : 0);
+}
+
 /* Setup-host zip-root exe → build-release product (bios/mods/assets/settings). */
 void psxrecomp_codegen_host_forward_if_built(
     const PsxrecompCodegenHostConfig* cfg, int argc, char** argv) {
+    host_selfcheck_or_return(cfg, argc, argv); /* exits when requested */
 #if defined(PSX_HAS_GAME_DISPATCH)
     /* Full game binary — already the product tree. */
     (void)cfg;
@@ -3902,7 +4783,11 @@ void psxrecomp_codegen_host_relaunch_or_exit(const char* disc_path) {
         if (g_relaunch_is_helper) {
             fprintf(stderr,
                     "psxrecomp-codegen: starting deferred rebuild helper\n");
-            snprintf(cmd, sizeof(cmd), "cmd.exe /C \"%s\"", exe);
+            /* cmd /C strips the first and last quote of the command line
+             * when it holds special characters such as the parentheses in
+             * "r4-1.0-windows-x64 (1)"; the doubled outer pair keeps the
+             * path's own quotes intact. */
+            snprintf(cmd, sizeof(cmd), "cmd.exe /C \"\"%s\"\"", exe);
             flags = CREATE_NEW_CONSOLE;
         } else {
             fprintf(stderr, "psxrecomp-codegen: relaunching %s\n", exe);
@@ -3972,10 +4857,12 @@ void psxrecomp_codegen_host_apply(RecompLauncherCGameInfo* gi,
 
     /* Master switch for recomp-ui: first-run wizard + Generate & rebuild. */
     gi->setup_wizard_supported = 1;
-    /* Setup SDKs often link OpenBIOS only (retail C comes from Generate).
-     * psx_bios_has_selectable() is then 0 and would hide the BIOS row — keep
-     * the optional SCPH1001 picker so prepare can ingest a dump first. */
-    gi->has_bios = 1;
+    /* has_bios is NOT forced here. A setup SDK links OpenBIOS only and needs
+     * the retail picker so prepare can ingest a dump, but a shipped bundled
+     * build has no CLI, sources or toolchain to compile one in, and forcing
+     * the row there offered "Generate & rebuild" that could never run.
+     * main.cpp decides after this returns, from whether prepare_with_progress
+     * was actually wired below (or nothing is linked yet). */
 
     if (!discover_project_root(g_project_root, sizeof(g_project_root))) {
         /* Still force the wizard when generated/ is missing — discover may
@@ -4007,6 +4894,15 @@ void psxrecomp_codegen_host_apply(RecompLauncherCGameInfo* gi,
     (void)find_python(g_python, sizeof(g_python));
     gi->persist_setup = host_persist_setup;
     gi->persist_setup_ctx = NULL;
+    /* Multi-disc titles only: load_game_toml_disc_roster leaves g_num_discs 0
+     * for a single image, so the wizard keeps its one-image layout and the
+     * launcher keeps taking the single-path flush. */
+    load_game_toml_disc_roster();
+    if (g_num_discs > 1) {
+        gi->discs = g_disc_roster;
+        gi->num_discs = g_num_discs;
+        gi->persist_setup_discs = host_persist_setup_discs;
+    }
     gi->prepare_with_progress = host_prepare_generate;
     gi->prepare_use_selected_rom = 1;
     /* Number prefix is applied in the setup UI (BIOS adds a step). */
@@ -4076,6 +4972,19 @@ void psxrecomp_codegen_host_apply(RecompLauncherCGameInfo* gi,
     if (psxrecomp_codegen_host_sources_missing(cfg) || force_setup) {
         gi->needs_setup = 1;
         gi->prepare_required_before_continue = 1;
+        if (!force_setup) {
+            /* Loop breaker: a recent successful generate with sources still
+             * missing is a config skew, not a first run — say so in the
+             * wizard instead of silently asking for another round. */
+            const char* note = host_loop_breaker_note();
+            if (note)
+                gi->prepare_disc_note = note;
+        }
+    } else {
+        /* Sources are visible again — the last generate resolved; drop the
+         * stamp so a much later manual wipe of generated/ reads as a fresh
+         * first run, not a loop. */
+        host_clear_generate_stamp();
     }
 #endif /* PSX_HAS_SETUP_WIZARD */
 }

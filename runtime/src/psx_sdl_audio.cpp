@@ -46,13 +46,14 @@ extern "C" SDL_AudioDeviceID psx_sdl_audio_open(
     }
 
     const SDL_AudioDeviceID device = SDL_GetAudioStreamDevice(s_audio_stream);
-    SDL_AudioSpec obtained = requested;
-    (void)SDL_GetAudioDeviceFormat(device, &obtained, nullptr);
     if (have) {
+        /* Report the stream input spec. SDL3 converts from this format to the
+         * device format internally; reporting the device format here makes the
+         * runtime generate at the wrong rate before SDL resamples it again. */
         std::memset(have, 0, sizeof(*have));
-        have->freq = obtained.freq;
-        have->format = obtained.format;
-        have->channels = obtained.channels;
+        have->freq = requested.freq;
+        have->format = requested.format;
+        have->channels = requested.channels;
         have->samples = want->samples;
     }
 
@@ -64,6 +65,13 @@ extern "C" int psx_sdl_audio_resume(SDL_AudioDeviceID)
     return s_audio_stream && SDL_ResumeAudioStreamDevice(s_audio_stream)
                ? 0
                : -1;
+}
+
+extern "C" void psx_sdl_audio_set_paused(SDL_AudioDeviceID, int paused)
+{
+    if (!s_audio_stream) return;
+    if (paused) (void)SDL_PauseAudioStreamDevice(s_audio_stream);
+    else (void)SDL_ResumeAudioStreamDevice(s_audio_stream);
 }
 
 extern "C" void psx_sdl_audio_close(SDL_AudioDeviceID)
@@ -137,6 +145,11 @@ extern "C" int psx_sdl_audio_resume(SDL_AudioDeviceID device)
 {
     SDL_PauseAudioDevice(device, 0);
     return 0;
+}
+
+extern "C" void psx_sdl_audio_set_paused(SDL_AudioDeviceID device, int paused)
+{
+    SDL_PauseAudioDevice(device, paused ? 1 : 0);
 }
 
 extern "C" void psx_sdl_audio_close(SDL_AudioDeviceID device)

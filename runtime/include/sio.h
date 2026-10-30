@@ -17,8 +17,50 @@ extern "C" {
 #error "PSX_MAX_PLAYERS must be in 1..8"
 #endif
 
+/* Per-pad table initializer: repeat one element PSX_MAX_PLAYERS times.
+ *
+ *     static uint16_t pad_buttons[PSX_MAX_PLAYERS] = { PSX_PAD_INIT(0xFFFF) };
+ *
+ * GNU's [0 ... PSX_MAX_PLAYERS - 1] = x range designator says this in one
+ * token, but it is a GCC extension with no MSVC equivalent, so the element
+ * list is expanded by the preprocessor instead. Each PSX_PAD_REP_n is written
+ * flat rather than recursively so no nested macro call is involved and the
+ * expansion is identical under both the conforming and the traditional MSVC
+ * preprocessor. Variadic so a braced element ({ 0x80, 0x80, 0x80, 0x80 })
+ * survives argument splitting. The 1..8 bound above is what makes the ladder
+ * finite; a value outside it fails the #error before reaching an undefined
+ * PSX_PAD_REP_n. The count always matches the array extent because both are
+ * spelled PSX_MAX_PLAYERS. */
+#define PSX_PAD_REP_1(...) __VA_ARGS__
+#define PSX_PAD_REP_2(...) __VA_ARGS__, __VA_ARGS__
+#define PSX_PAD_REP_3(...) __VA_ARGS__, __VA_ARGS__, __VA_ARGS__
+#define PSX_PAD_REP_4(...) __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__
+#define PSX_PAD_REP_5(...) \
+    __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__
+#define PSX_PAD_REP_6(...) \
+    __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, \
+    __VA_ARGS__
+#define PSX_PAD_REP_7(...) \
+    __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, \
+    __VA_ARGS__, __VA_ARGS__
+#define PSX_PAD_REP_8(...) \
+    __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, __VA_ARGS__, \
+    __VA_ARGS__, __VA_ARGS__, __VA_ARGS__
+/* Two layers so PSX_MAX_PLAYERS expands to its value before the ## paste. */
+#define PSX_PAD_REP_JOIN(n, ...) PSX_PAD_REP_##n(__VA_ARGS__)
+#define PSX_PAD_REP_EXPAND(n, ...) PSX_PAD_REP_JOIN(n, __VA_ARGS__)
+#define PSX_PAD_INIT(...) PSX_PAD_REP_EXPAND(PSX_MAX_PLAYERS, __VA_ARGS__)
+
 /* SIO0 register base: 0x1F801040 */
 #define SIO_BASE 0x1F801040
+
+/* Emulated controller identity used by the game's SIO poll. */
+enum {
+    SIO_PAD_DIGITAL = 0,
+    SIO_PAD_DUALSHOCK = 1,
+    SIO_PAD_JOGCON = 2,
+    SIO_PAD_NEGCON = 3   /* NPC-101: ID 0x23, twist + analog I/II/L, no config */
+};
 
 /* Phase 1.0c-v2: cycle-paced SIO model. Default 1 enables the dispatch-
  * loop quantum tick (gated by g_sio_timing_active). Set to 0 to revert
@@ -107,6 +149,11 @@ void sio_set_pad_state_slot(int slot, uint16_t buttons);
  * 0x73, with the four 0..255 stick axes appended; 0x80 = centred). */
 void sio_set_pad_analog(int slot, int enabled,
                         uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
+/* Set one of SIO_PAD_* explicitly. JogCon consumes left-X as a signed
+ * steering position, centered at 0x80; NeGcon consumes left-X as its 0..255
+ * twist (0x80 centred). Both ignore the remaining axes. */
+void sio_set_pad_type(int slot, int type,
+                      uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
 
 /* Per-frame input plumbing for the coherent-DualShock model. Update the sticks
  * every frame with sio_set_pad_sticks; change the reported pad type with
@@ -115,7 +162,18 @@ void sio_set_pad_analog(int slot, int enabled,
  * flip can never split a poll or a config handshake. Do NOT call
  * sio_set_pad_analog every frame for the type — that is for boot/hotplug only. */
 void sio_set_pad_sticks(int slot, uint8_t lx, uint8_t ly, uint8_t rx, uint8_t ry);
-void sio_request_pad_type(int slot, int analog);
+/* Request SIO_PAD_* at the next idle, non-config bus boundary. A game's 0x44
+ * mode lock holds DualShock/digital/JogCon flips; entering or leaving NeGcon is
+ * a device swap that applies anyway and clears the lock, config latch and
+ * motor map (a different controller in the port). */
+void sio_request_pad_type(int slot, int type);
+/* NeGcon analog buttons I, II and L for the next poll (0 released .. 0xFF
+ * fully pressed). Host input like the sticks; ignored unless the slot reports
+ * SIO_PAD_NEGCON. */
+void sio_set_pad_negcon(int slot, uint8_t i, uint8_t ii, uint8_t l);
+void sio_get_pad_negcon(int slot, uint8_t out[3]);
+/* 1 while the game has locked the pad's analog mode (0x44 lock byte 0x03). */
+int sio_get_pad_mode_locked(int slot);
 
 /* Connect / disconnect a logical pad (0 .. PSX_MAX_PLAYERS-1). By default no
  * pads are connected during initial BIOS boot. */
@@ -144,6 +202,9 @@ void sio_set_pad_config_capable(int slot, int capable);
  * motor byte; `large` is the variable-strength low-frequency motor byte.
  * The frontend translates these values to its host controller API. */
 void sio_get_pad_rumble(int slot, uint8_t *small, uint8_t *large);
+/* JogCon motor: last command nibble and strength (0..15) the guest sent; 0, 0
+ * unless the slot is a connected JogCon. Host force feedback reads it. */
+void sio_get_pad_jogcon_motor(int slot, uint8_t *command, uint8_t *strength);
 
 /* Return current pad button state (for debug server). _slot targets a logical
  * pad 0 .. PSX_MAX_PLAYERS-1. */
@@ -157,6 +218,8 @@ uint16_t sio_get_pad_buttons_slot(int slot);
 uint16_t sio_peek_stat(void);
 uint16_t sio_peek_ctrl(void);
 uint8_t  sio_peek_rx_data(void);
+/* SIO_STAT reads left before a visible ACK clears (side-effect free). */
+int      sio_peek_ack_visible_reads(void);
 
 /* Debug accessors: is a logical pad connected, and is it in analog mode. */
 int sio_get_pad_connected(int slot);
@@ -203,48 +266,22 @@ uint32_t sio_get_seq(void);
  * transaction by issuing 0x01 on the SIO bus mid-read. */
 int sio_card_protocol_active(void);
 
-/* 1 while a card txn/protocol is live or a card ACK just fired. interrupts.c
- * uses this to defer in-exception ChangeThread so the game's SIO IntRP can
- * finish its A6C10/B4E38 handshake (Ape Escape LOAD). */
-int sio_should_defer_thread_switch(void);
-
-/* -------------------------------------------------------------------------
- * Ape Escape LOAD GAME — IMPORTANT memcard path
- *
- * LibCardIntRP needs one distinct IRQ7 edge per nest pop. SIO pacing (MT=1),
- * ACK defer, I_MASK.7 hold, and nest IRQ pulses below exist so presence-probe
- * → directory → file-list can complete.
- * EXPERIMENT (TwistedMetal4Recomp): formerly netplay-inert / MotK-uncapped;
- * ungated for local netplay desync testing. PSX_APE_CARD_UNSTICK=0 disables
- * nest repair + bit7 hold. See ApeEscapeRecomp/docs/APE_MEMCARD_LOAD.md.
- * ------------------------------------------------------------------------- */
-
-/* Post-probe handoff ring: bit7 enable → TX 0x57 (debug_server card_handoff). */
+/* Post-probe handoff ring: diagnostic device state only, no guest-RAM probes. */
 typedef struct {
-    uint8_t  kind;   /* 1=probe_abort 2=b7_set 3=b7_clear 4=tx 5=card_ack
-                      * 6=unstick 7=select_flush_ack 8=ack_deferred_istat7
-                      * 9=nest_irq_pulse 10=b7_hold */
+    uint8_t  kind;   /* 1=probe_abort 2=b7_set 3=b7_clear 4=tx 5=card_ack */
     uint8_t  byte;
     uint16_t imask;
     uint32_t pc;
     uint32_t func;
-    uint32_t a6c10;
-    uint32_t b4e30;
-    uint32_t b4e38;
+    uint32_t ctrl;
+    uint32_t stat;
+    uint32_t card_state;
     uint64_t cyc;
 } SioCardHandoffEntry;
 const SioCardHandoffEntry *sio_get_card_handoff(int *idx_out, int *count_out);
 int sio_card_handoff_cap(void);
 int sio_card_handoff_armed(void);
 void sio_card_handoff_on_imask(uint32_t old_mask, uint32_t new_mask);
-/* Ape Escape: 1 while libcard nest is stuck post-probe — keep I_MASK.7 so
- * IntRP can finish (BIOS otherwise clears bit7 ~tens of cycles after SELECT
- * abort, before the pending SIO edge is taken). */
-int sio_card_should_hold_imask_bit7(void);
-/* Ape Escape: nest repair pump when the guest waiter polls RAM only
- * (no SIO MMIO → sio_tick never runs). IRQ re-edge only — never poke A6C10 /
- * invent B4E38. */
-void sio_ape_card_unstick_pump(void);
 
 /* Netplay deferred-present coexistence: 1 while native memcard SIO is
  * busy and still making progress. Callers keep s_present_pending and

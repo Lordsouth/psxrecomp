@@ -10,6 +10,30 @@ extern "C" {
 #define MEMCARD_SIZE         (128 * 1024)   /* 128KB per card */
 #define MEMCARD_SECTOR_SIZE  128
 #define MEMCARD_SECTORS      1024
+#define MEMCARD_EXTENSION_MAX 131072u
+
+/* Optional game-owned metadata after the standard 128KiB image. The serial
+ * device and raw export see only the standard image. A missing codec preserves
+ * a loaded opaque tail unchanged; its title-specific binding may become stale.
+ * Callbacks run on the emulation thread and must not re-enter card I/O.
+ * load: zero accepts, negative blocks flushing until a successful reload.
+ * save: return tail byte count (zero = raw card), negative aborts the flush.
+ * Both callbacks are required. Reset before each mod session's activation.
+ * Selecting a codec blocks existing cards until initialization/reload has
+ * successfully validated them with that codec's load callback.
+ * The codec must define native save fallback, slot identity and restore policy;
+ * this transport cannot infer those from an opaque tail. */
+typedef int (*MemcardExtensionLoad)(int card, const uint8_t* base,
+                                  const uint8_t* tail, uint32_t tail_size);
+typedef int (*MemcardExtensionSave)(int card, const uint8_t* base,
+                                  uint8_t* tail, uint32_t capacity);
+void memcard_set_extension_codec(MemcardExtensionLoad load,
+                                MemcardExtensionSave save);
+/* Register codecs during activation. Extended-card transport is offline-only. */
+int memcard_extension_codec_active(void);
+/* Last attempted disk flush: 0 success, -1 I/O failure, -2 extension rejected.
+ * On failure the card stays dirty and the original file stays intact. */
+int memcard_last_flush_result(int card);
 
 /* Initialize memcard subsystem. dir = directory for .mcd files (can be NULL).
  * Loads (or formats+creates) card1.mcd / card2.mcd in `dir` for both slots. */
@@ -37,7 +61,7 @@ const char* memcard_mod_subdir(void);
  * .mcd file's directory frames without touching the live card array. */
 typedef struct {
     int       exists;        /* file present and readable */
-    int       valid;         /* 128KB and "MC" magic in frame 0 */
+    int       valid;         /* complete 128KB base and "MC" magic in frame 0 */
     int       used_blocks;   /* directory frames in use (0..15) */
     int       total_blocks;  /* always 15 */
     uint8_t   block_used[15];/* per-block: 1 = occupied, 0 = free */
@@ -87,6 +111,11 @@ int memcard_rebind_dir(const char *dir);
 
 /* Restore explicit per-slot filepaths (from a prior snapshot). NULL path skips. */
 int memcard_rebind_paths(const char *path0, const char *path1);
+
+/* Rebind ONE slot's on-disk path without touching RAM. An empty/NULL path
+ * unbinds the slot (no file, not present) — the way to put back a slot the
+ * player had disabled after a sandbox bound it. Returns 0, -1 on bad slot. */
+int memcard_rebind_path(int card, const char *path);
 
 /* Reload in-memory images from the currently bound filepaths (0 = ok). */
 int memcard_reload_bound(void);

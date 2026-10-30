@@ -8,6 +8,8 @@ extern "C" {
 #endif
 
 void cdrom_init(const char* cue_path);
+uint32_t cdrom_snapshot_bytes(void);
+int cdrom_snapshot_validate(const uint8_t *p, uint32_t len);
 
 /* Did cdrom_init() actually mount an image? 0 = the drive is empty.
  *
@@ -31,6 +33,22 @@ void cdrom_notify_game_started(void);
  * ring buffer to correlate each sector transfer with its disc position. */
 int  cdrom_get_setloc_lba(void);
 
+/* Trusted opt-in resident adapter: fold a verified Mode2/Form1 data span
+ * after its real ReadN ACK, before the first sector has arrived. The commit
+ * callback copies the complete span to RAM and must not advance guest time.
+ * A zero callback result leaves controller state unchanged. Success retains
+ * the actual final header/FIFO and next drive cursor, cancels sector delivery,
+ * and raises no IRQ; the title must finish its audited SDK completion/Pause.
+ * last_user_data must be the verified final2048-byte payload. */
+int cdrom_resident_complete_read(uint32_t lba, uint32_t sectors,
+    const uint8_t* last_user_data, int (*commit)(void*), void* context);
+
+/* Admit one verified resident data sector into the real ReadN FIFO/IRQ path.
+ * Requires an ACKed stream at lba, no pending controller/DMA/payload owner,
+ * and matching pure-data raw bytes. Never stops the stream or calls a guest
+ * callback. The title must separately prove its destination/upload ownership. */
+int cdrom_resident_feed_sector(uint32_t lba, const uint8_t* user_data);
+
 /* 'instant' per-frame sector-IRQ budget (step 3). Clamped to [1, 4096];
  * the per-sector period additionally floors at CDROM_MIN_DELAY. Writers:
  * game.toml [runtime] instant_max_per_frame, the cdrom_instant_rate TCP
@@ -51,7 +69,51 @@ void cdrom_warm_route_stats_json(char* out, int cap);
  * Diagnostics only: recording never changes CD scheduling or delivery. */
 void cdrom_timing_reset(void);
 void cdrom_timing_stats_json(char* out, int cap);
+int cdrom_get_delivered_lba(void);
+/* Presentation-only stream identity. Advances on a successful SetLoc or
+ * seek, independent of host time; not part of emulated controller state. */
+uint64_t cdrom_get_stream_generation(void);
+int cdrom_get_stream_start_lba(void);
+
+/* Per-record view of the same ring, for localising a single lost/skipped
+ * sector rather than summarising thousands. */
+typedef struct CdTimingPub {
+    uint64_t seq;
+    uint64_t due_cycle;
+    uint64_t buffer_cycle;
+    uint64_t irq_arm_cycle;
+    uint64_t intc_cycle;
+    uint32_t frame;
+    int32_t  lba;
+    uint8_t  flags;      /* CDT_* bits, mirrored in the JSON as named fields */
+} CdTimingPub;
+uint64_t cdrom_timing_total(void);
+int cdrom_timing_record(uint64_t seq, CdTimingPub* out);
+/* Notify the guest that the mounted disc was reinserted. The controller stops
+ * active transfers, reports an open shell, waits two emulated seconds, then
+ * makes the mounted media readable. This call does not mount a different image. */
 void debug_force_cd_reinsert(void);
+
+/* Multi-disc support. The roster is the image set this build was made from
+ * (game.toml [game] discs), registered once at launch in roster order.
+ *
+ * cdrom_disc_select() mounts a different image while the game runs, through
+ * the same tray-open event as a reinsert, so a title that asks for its other
+ * disc can be answered. Returns 0 if the index is outside the roster or the
+ * image will not open. Indexes are 1-based, matching [disc] selected. */
+void cdrom_disc_roster_set(const char *const *paths, int count,
+                           int selected_1based);
+int  cdrom_disc_roster_count(void);
+int  cdrom_disc_selected(void);
+const char *cdrom_disc_roster_path(int index_1based);
+int  cdrom_disc_select(int index_1based);
+
+/* TOC of the image currently mounted; 0 when the drive is empty. Two images
+ * of a set have different TOCs, so this is how a caller confirms that a disc
+ * change reached the reader instead of only moving an index. */
+uint32_t cdrom_mounted_sector_count(void);
+int      cdrom_mounted_track_count(void);
+
 /* FMV auto-skip detection: cdrom_xa_stream_active() lets the frontend detect
  * that streaming XA (FMV/CDDA) is in progress. The skip itself is done by the
  * frontend via uncapped pacing (it does NOT alter CD timing — flooding XA
@@ -178,6 +240,17 @@ typedef struct CDROMDebugState {
     /* One-deep pended data-ready INT1 accounting (Beetle SetAIP analog). */
     uint64_t int1_pended;
     uint64_t int1_lost;
+    /* Accelerated-read flow control: holds where a faster-than-hardware
+     * sector was deferred rather than allowed to clobber an unconsumed one.
+     * Nonzero is healthy (the guest was busy and the enhancement waited);
+     * int1_lost rising while the speed divisor != 1 is the regression. */
+    /* Sector-ring tripwires: starved = a drain found its slot exhausted
+     * while the writer had moved on (must stay 0); dropped = an unread slot
+     * was overwritten because the guest fell a full ring behind. */
+    uint64_t ring_starved;
+    uint64_t ring_dropped;
+    uint64_t accel_consumer_waits;
+    uint64_t accel_consumer_wait_cycles;
     uint8_t  int1_pending_now;
 } CDROMDebugState;
 
@@ -229,6 +302,10 @@ typedef struct CDROMTraceEntry {
 
 typedef struct CDROMCommandHistoryEntry {
     uint64_t seq;
+    /* Guest cycle at which this command was issued/executed. Frame numbers
+     * cannot separate "the guest had not asked yet" from "the command was
+     * queued behind an unacked INT" -- both look like one frame. */
+    uint64_t cycle;
     uint32_t frame;
     uint32_t func;
     uint32_t pc;
@@ -254,6 +331,10 @@ typedef struct CDROMCommandHistoryEntry {
     uint8_t pending_pending;
     uint8_t queued_cmd;
     uint8_t queued_pending;
+    /* Immediate response FIFO as the guest will read it (e.g. the GetTD MSF,
+     * the GetTN track range), so a TOC can be checked from the ring. */
+    uint8_t response_count;
+    uint8_t response[16];
 } CDROMCommandHistoryEntry;
 
 typedef struct CDROMSectorHistoryEntry {
