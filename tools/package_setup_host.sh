@@ -685,7 +685,9 @@ esac
 # if(EXISTS "...") is optional by construction, and a glob or a path built from
 # a cmake variable cannot be resolved here.
 if [[ -f "${STAGE}/CMakeLists.txt" ]]; then
-  cml="${STAGE}/CMakeLists.txt"
+  # Full-line comments reference nothing (a commented-out APP_ICON is common).
+  cml="$(mktemp)"
+  sed -E 's/^[[:space:]]*#.*$//' "${STAGE}/CMakeLists.txt" >"${cml}"
   # A CMakeLists.txt with no if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/...") guard at
   # all is normal, and grep exits 1 on no match. Under `set -e -o pipefail` that
   # status propagates out of the command substitution and kills the packager
@@ -706,8 +708,10 @@ if [[ -f "${STAGE}/CMakeLists.txt" ]]; then
     echo "error: CMakeLists.txt references paths that are not staged in the zip:" >&2
     for r in "${missing_refs[@]}"; do echo "  - ${r}" >&2; done
     echo "  add them via --project-file / --project-dir in the title's setup-host wrapper" >&2
+    rm -f "${cml}"
     exit 1
   fi
+  rm -f "${cml}"
 fi
 
 # Second gate: the project's own C must be able to include what it includes.
