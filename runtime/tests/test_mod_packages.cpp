@@ -1278,6 +1278,183 @@ int main() {
               root / "feature-derived.toml", feature_derived, &error),
           "feature-style packages must reject derived-disc operations");
 
+    {
+        const std::string sha_a(64, 'a');
+        const std::string sha_b(64, 'b');
+        write_bytes(root / "delta/assets/remaster.bps", {'B', 'P', 'S', '1'});
+        const auto delta_manifest = [&](int format_version,
+                                        const std::string& delta) {
+            std::string text = manifest("delta.mod", "1.0.0",
+                "\n[[feature]]\n"
+                "id = \"remaster\"\n"
+                "name = \"Remaster\"\n"
+                "[[disc_delta]]\n" + delta);
+            text.replace(text.find("format_version = 1"), 18,
+                         "format_version = " + std::to_string(format_version));
+            write_text(root / "delta/manifest.toml", text);
+            ModPackage parsed;
+            const bool ok = ModPackageManager::read_manifest(
+                root / "delta/manifest.toml", parsed, &error);
+            return ok ? parsed.disc_deltas.size() : (size_t)0;
+        };
+        const std::string body =
+            "feature = \"remaster\"\nformat = \"bps\"\n";
+        const std::string file = "file = \"assets/remaster.bps\"\n";
+        const std::string hashes =
+            "source_sha256 = \"" + sha_a + "\"\n"
+            "target_sha256 = \"" + sha_b + "\"\n";
+        check(delta_manifest(6, body + file + hashes) == 1,
+              "a format-6 disc delta must parse");
+        check(delta_manifest(5, body + file + hashes) == 0,
+              "disc deltas must require format_version 6");
+        check(delta_manifest(6,
+                  "feature = \"missing\"\nformat = \"bps\"\n" + file +
+                  hashes) == 0,
+              "a disc delta must belong to a declared feature");
+        check(delta_manifest(6,
+                  "feature = \"remaster\"\nformat = \"ips\"\n" + file +
+                  hashes) == 0,
+              "only BPS disc deltas are accepted");
+        check(delta_manifest(6,
+                  body + "file = \"../remaster.bps\"\n" + hashes) == 0,
+              "a disc delta path must stay inside the package");
+        check(delta_manifest(6,
+                  body + "file = \"assets/absent.bps\"\n" + hashes) == 0,
+              "a disc delta must ship its patch");
+        check(delta_manifest(6, body + file +
+                  "source_sha256 = \"" + sha_a + "\"\n"
+                  "target_sha256 = \"" + sha_a + "\"\n") == 0,
+              "a disc delta must change the image");
+        check(delta_manifest(6, body + file +
+                  "source_sha256 = \"" + std::string(64, 'A') + "\"\n"
+                  "target_sha256 = \"" + sha_b + "\"\n") == 0,
+              "disc delta hashes must be lowercase SHA-256");
+    }
+
+    {
+        /* Feature-level conflicts: alpha.mod/big names two beta features;
+         * beta names nothing back, so this also proves symmetry. */
+        const fs::path conflict_root = root / "feature-conflicts";
+        const auto feature_package = [](const std::string& id,
+                                        const std::string& features) {
+            return "format_version = 6\n"
+                   "id = \"" + id + "\"\n"
+                   "version = \"1.0.0\"\n"
+                   "name = \"" + id + "\"\n"
+                   "[[target]]\n"
+                   "game_id = \"SLUS-TEST\"\n" + features;
+        };
+        write_text(conflict_root / "packages/alpha.mod/1.0.0/manifest.toml",
+                   feature_package("alpha.mod",
+                       "[[feature]]\nid = \"big\"\nname = \"Big Overhaul\"\n"
+                       "conflicts = [\"beta.mod/one\", \"beta.mod/two\"]\n"
+                       "[[feature]]\nid = \"keep\"\nname = \"Keep\"\n"));
+        write_text(conflict_root / "packages/beta.mod/1.0.0/manifest.toml",
+                   feature_package("beta.mod",
+                       "[[feature]]\nid = \"one\"\nname = \"One\"\n"
+                       "[[feature]]\nid = \"two\"\nname = \"Two\"\n"
+                       "[[feature]]\nid = \"three\"\nname = \"Three\"\n"));
+        ModPackageManager mods(conflict_root);
+        check(mods.scan(&error) && mods.load_state(&error), error.c_str());
+        for (const char* id : {"one", "two", "three"})
+            check(mods.set_feature_enabled("beta.mod", id, true, &error),
+                  error.c_str());
+        check(mods.set_feature_enabled("alpha.mod", "keep", true, &error),
+              error.c_str());
+
+        std::vector<std::pair<std::string, std::string>> turned_off;
+        check(mods.set_feature_enabled("alpha.mod", "big", true, &error,
+                                       &turned_off),
+              error.c_str());
+        check(mods.feature_enabled("alpha.mod", "big") &&
+                  !mods.feature_enabled("beta.mod", "one") &&
+                  !mods.feature_enabled("beta.mod", "two") &&
+                  mods.feature_enabled("beta.mod", "three") &&
+                  mods.feature_enabled("alpha.mod", "keep"),
+              "enabling a feature must turn off exactly its conflicts");
+        check(turned_off.size() == 2 &&
+                  turned_off[0] == std::make_pair(std::string("beta.mod"),
+                                                  std::string("one")) &&
+                  turned_off[1] == std::make_pair(std::string("beta.mod"),
+                                                  std::string("two")),
+              "auto-disabled features must be reported");
+        check(mods.resolve("SLUS-TEST").ok,
+              "the auto-resolved selection must resolve");
+
+        check(mods.set_feature_enabled("beta.mod", "one", true, &error,
+                                       &turned_off),
+              error.c_str());
+        check(mods.feature_enabled("beta.mod", "one") &&
+                  !mods.feature_enabled("alpha.mod", "big") &&
+                  turned_off.size() == 1 &&
+                  turned_off[0].first == "alpha.mod" &&
+                  turned_off[0].second == "big",
+              "conflicts must be symmetric: last action wins");
+        check(mods.set_feature_enabled("beta.mod", "three", true, &error,
+                                       &turned_off) &&
+                  turned_off.empty(),
+              "a non-conflicting toggle must turn nothing off");
+
+        check(mods.save_state(&error), error.c_str());
+        ModPackageManager reloaded(conflict_root);
+        check(reloaded.scan(&error) && reloaded.load_state(&error),
+              error.c_str());
+        check(reloaded.feature_enabled("beta.mod", "one") &&
+                  !reloaded.feature_enabled("beta.mod", "two") &&
+                  !reloaded.feature_enabled("alpha.mod", "big"),
+              "auto-disabled features must persist through state.toml");
+
+        /* A hand-edited state.toml with both sides on gets a named
+         * diagnostic, not a bare refusal. */
+        write_text(conflict_root / "state.toml",
+                   "format_version = 2\n"
+                   "[[feature]]\npackage_id = \"alpha.mod\"\n"
+                   "id = \"big\"\nenabled = true\n"
+                   "[[feature]]\npackage_id = \"beta.mod\"\n"
+                   "id = \"one\"\nenabled = true\n");
+        check(reloaded.load_state(&error), error.c_str());
+        const ModResolution clash = reloaded.resolve("SLUS-TEST");
+        const bool named = std::any_of(
+            clash.diagnostics.begin(), clash.diagnostics.end(),
+            [](const ModResolution::Diagnostic& d) {
+                return d.package_id == "alpha.mod" && d.feature_id == "big" &&
+                       d.other_package_id == "beta.mod" &&
+                       d.other_feature_id == "one" &&
+                       d.message.find("Big Overhaul") != std::string::npos &&
+                       d.message.find("One") != std::string::npos;
+            });
+        check(!clash.ok && named && clash.errors.size() == 1 &&
+                  clash.errors[0].find("alpha.mod/big (Big Overhaul) "
+                                       "conflicts with beta.mod/one (One)") !=
+                      std::string::npos,
+              "both-enabled conflicting features must be named in a "
+              "diagnostic and error");
+
+        ModPackage parsed;
+        write_text(conflict_root / "old.toml",
+                   "format_version = 5\nid = \"old.mod\"\nversion = \"1.0.0\"\n"
+                   "name = \"Old\"\n[[target]]\ngame_id = \"SLUS-TEST\"\n"
+                   "[[feature]]\nid = \"a\"\nname = \"A\"\n"
+                   "conflicts = [\"beta.mod/one\"]\n");
+        check(!ModPackageManager::read_manifest(
+                  conflict_root / "old.toml", parsed, &error),
+              "feature conflicts must require format_version 6");
+        write_text(conflict_root / "malformed.toml",
+                   feature_package("bad.mod",
+                       "[[feature]]\nid = \"a\"\nname = \"A\"\n"
+                       "conflicts = [\"beta.mod\"]\n"));
+        check(!ModPackageManager::read_manifest(
+                  conflict_root / "malformed.toml", parsed, &error),
+              "a feature conflict must name package_id/feature_id");
+        write_text(conflict_root / "self.toml",
+                   feature_package("bad.mod",
+                       "[[feature]]\nid = \"a\"\nname = \"A\"\n"
+                       "conflicts = [\"bad.mod/a\"]\n"));
+        check(!ModPackageManager::read_manifest(
+                  conflict_root / "self.toml", parsed, &error),
+              "a feature must not conflict with itself");
+    }
+
     ModPackage invalid;
     write_text(root / "bad.toml",
                "format_version=1\nid=\"../bad\"\nversion=\"1.0.0\"\nname=\"Bad\"\n"

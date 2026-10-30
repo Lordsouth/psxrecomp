@@ -47,6 +47,9 @@ struct ModFeature {
     std::string group = "General";
     bool default_enabled = false;
     bool legacy = false;
+    /* "package_id/feature_id" keys this feature cannot run alongside (format
+     * 6). Symmetric: either side naming the other is enough. */
+    std::vector<std::string> conflicts;
 };
 
 enum class ModConstraintKind {
@@ -173,6 +176,18 @@ struct ModDerivedDisc {
     std::map<std::string, std::string> when;
 };
 
+/* A whole-image binary delta (format 6) from the stock raw disc to a patched
+ * raw disc. The runtime applies it to the player's verified image and serves
+ * every changed or appended 2352-byte sector as a raw overlay. */
+struct ModDiscDelta {
+    std::string feature_id;
+    std::string format = "bps";
+    std::filesystem::path file;
+    std::string source_sha256;
+    std::string target_sha256;
+    std::map<std::string, std::string> when;
+};
+
 struct ModAuthorLink {
     std::string name;
     std::string url;
@@ -202,6 +217,7 @@ struct ModPackage {
     std::vector<ModOverlay> overlays;
     std::vector<ModPlugin> plugins;
     std::vector<ModDerivedDisc> derived_discs;
+    std::vector<ModDiscDelta> disc_deltas;
 };
 
 struct ModFeatureSelection {
@@ -255,6 +271,15 @@ struct ModResolution {
         std::string package_id;
     };
     std::vector<DerivedDisc> derived_discs;
+    struct DiscDelta {
+        std::string format;
+        std::filesystem::path file;
+        std::string source_sha256;
+        std::string target_sha256;
+        std::string package_id;
+        std::string feature_id;
+    };
+    std::vector<DiscDelta> disc_deltas;
     struct Plugin {
         std::string id;
         std::string package_id;
@@ -308,9 +333,13 @@ public:
                         std::string* error = nullptr);
     bool set_option(const std::string& id, const std::string& option,
                     const std::string& value, std::string* error = nullptr);
-    bool set_feature_enabled(const std::string& package_id,
-                             const std::string& feature_id, bool enabled,
-                             std::string* error = nullptr);
+    /* Enabling a feature turns off every enabled feature it conflicts with
+     * (last action wins). turned_off receives each (package_id, feature_id)
+     * that went from enabled to disabled as a side effect. */
+    bool set_feature_enabled(
+        const std::string& package_id, const std::string& feature_id,
+        bool enabled, std::string* error = nullptr,
+        std::vector<std::pair<std::string, std::string>>* turned_off = nullptr);
     bool set_feature_option(const std::string& package_id,
                             const std::string& feature_id,
                             const std::string& option_id,

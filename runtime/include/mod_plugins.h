@@ -179,6 +179,16 @@ int psx_mod_option_value(const char* package_id, const char* feature_id,
                          const char* option_id, char* out, uint32_t out_size);
 
 /*
+ * Activation-only: keep this session's memory cards in <memcard_dir>/<name>/
+ * (an explicit card path keeps its file name inside a <name>/ folder next to
+ * it). For a mod whose saves the stock game cannot read. The request applies
+ * to the next card init and is then cleared, so it holds only while the
+ * feature stays enabled. name: 1-63 chars of [A-Za-z0-9_.-]. Returns 1 on
+ * success, 0 for an invalid name. Implemented in memcard.c.
+ */
+int psx_mod_set_memcard_subdir(const char* name);
+
+/*
  * Request a fixed host display aspect before renderer/window initialization.
  * Intended for activation callbacks that move a game's widescreen enhancement
  * out of generic Settings and into its mod catalog.

@@ -2833,9 +2833,18 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
          * passing through the write hooks that mark dirty pages. A real
          * control transfer to a decodable word above the configured boot-EXE
          * text end is enough evidence to admit that word to the interpreter.
+         * The same holds BELOW the floor for RAM the compiled image does not
+         * cover (game builds: not game text, which clean_game_text_miss owns):
+         * there is no native body there, so live RAM is the only code — e.g. a
+         * modded boot EXE whose loader stub CPU-copies code under t_addr.
          * Data and invalid targets still fail closed. */
-        if (phys < (2u * 1024u * 1024u) &&
-            phys >= g_overlay_region_floor &&
+        int no_compiled_body = phys >= g_overlay_region_floor;
+#ifdef PSX_HAS_GAME_DISPATCH
+        no_compiled_body = no_compiled_body ||
+            (phys >= DIRTY_RAM_KERNEL_WINDOW_END &&
+             !psx_game_address_in_text(addr));
+#endif
+        if (phys < (2u * 1024u * 1024u) && no_compiled_body &&
             dirty_ram_word_looks_decodable(fetch_word(phys))) {
             dirty_ram_mark_executable_range(phys, 4u);
         } else {
@@ -2855,6 +2864,14 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
      * is_local_dirty_target / phys_is_overlay_flow_region). Includes boot-text
      * pages overwritten by a runtime overlay (Tomba 2), not just [FLOOR, RAM). */
     int allow_local_dirty_flow = phys_is_overlay_flow_region(phys);
+    /* Game-entry handoff. A boot EXE whose pc0 lies outside the compiled image
+     * (a modded EXE's loader stub above the text end) reaches entry_pc by a
+     * guest jump from interpreted code. The just-loaded text is still DMA-dirty
+     * then, so local flow would chain straight into it and the dispatch-loop
+     * handoff (fntrace_record: mod main_exe plan, game-start latch, text
+     * baseline) would never run at entry_pc. Surface that one transfer instead.
+     * Latched once per run: game start only happens through that surface. */
+    const uint32_t pending_entry_phys = fntrace_pending_game_entry_phys();
 
     /* Per-PC entry counter (visible via dirty_ram_stats). */
     DirtyRamPcEntry *pc_entry = pc_table_get_or_insert(phys);
@@ -3162,6 +3179,7 @@ static int dirty_ram_dispatch_inner(CPUState* cpu, uint32_t addr, uint32_t stop_
             uint32_t target_phys = target & 0x1FFFFFFFu;
             if (allow_local_dirty_flow && target != 0 &&
                 target != stop_addr &&
+                target_phys != pending_entry_phys &&
                 phys_is_overlay_flow_region(target_phys) &&
                 dirty_ram_is_dirty(target_phys)) {
                 /* A runtime overlay may start executing while its final code

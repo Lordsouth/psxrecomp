@@ -332,6 +332,95 @@ direct indexed lookup rather than scanning every installed mod.
 Feature disc overlays require an exact `disc_sha256` on every target entry.
 `expected_sha256` can additionally guard the replaced stock range.
 
+Overlays may cover LBAs past the end of the stock image. While such a plan is
+active, those sectors start zeroed and the overlay fills them, and the disc's
+reported sector count (seek bounds, `GetTD` lead-out) grows to the last covered
+LBA. With no overlay past the end, reads and the TOC are exactly the stock
+image's.
+
+## Disc deltas
+
+Package format 6 can ship a fan patch as the author released it, as one
+whole-image binary delta from the stock raw disc to the patched raw disc:
+
+```toml
+format_version = 6
+
+[[feature]]
+id = "dw15"
+name = "Digimon World 1.5"
+
+[[disc_delta]]
+feature = "dw15"
+format = "bps"
+file = "assets/digimon_world_1_5_test1.bps"
+source_sha256 = "06084490ea0db34099b31495ccba4ec18fb0ff25c7683c508e9d2db93d4495f4"
+target_sha256 = "c51099d7b2cf44401eca5a54f7838f85205bccfff207b72dc2de7675ec6b8826"
+```
+
+`format` is `bps` (byuu's BPS1). `file` must stay inside the archive and must
+exist when the package is scanned. Both hashes are lowercase SHA-256 over the
+complete raw 2352-byte-per-sector image: a single-file BIN (picked directly or
+through its CUE) or a CHD's decoded raw sectors. Multi-file dumps fail the
+BPS source check. `when` conditions on the
+owning feature's options work as for other operations. Only one disc delta may
+be active at a time.
+
+When the owning feature is disabled the delta has no effect and nothing is
+loaded. When it is enabled, resolution refuses the whole plan unless the
+player's disc hashes to `source_sha256`. Before boot the runtime then:
+
+1. applies the BPS to the player's own image, verifying the patch, source,
+   and target CRC32s it carries;
+2. verifies the result against `target_sha256`;
+3. keeps every raw sector that differs from stock or lies past the stock end,
+   and serves them as raw overlays (the image may grow, never shrink); and
+4. caches those sectors in `mods/cache/disc_delta_<source16>_<target16>.sectors`
+   (the full hashes and a SHA-256 of the file are stored inside it), so later
+   launches load the verified cache instead of re-applying the patch. A cache
+   that does not verify is rebuilt.
+
+The first application holds the stock and patched images in memory together
+(about 800 MB for a full CD); cache hits need only the derived sectors. Any
+other enabled disc write or overlay touching a delta-owned sector fails with a
+collision before launch. The delta identity (`format`, both hashes, owner)
+participates in the plan fingerprint.
+
+## Feature conflicts
+
+Package format 6 lets a feature name other features it cannot run alongside,
+in any package, as `package_id/feature_id`:
+
+```toml
+[[feature]]
+id = "dw15"
+name = "Digimon World 1.5"
+conflicts = ["dw.vanilla.roster/roster", "dw.vanilla.gameplay/evolution-unbound"]
+```
+
+Conflicts are symmetric: one side naming the other is enough, so a total
+conversion can list everything it replaces without the other packages knowing
+about it. Entries naming a package or feature that is not installed are inert.
+A feature may not name itself.
+
+Players never resolve these by hand. Enabling a feature turns off every enabled
+feature it conflicts with, in both directions, and the last action wins:
+ticking `dw15` unticks the roster feature, and ticking the roster feature again
+unticks `dw15`. Features that required a feature turned off this way are turned
+off with it. The new selection is persisted through the normal `state.toml`
+commit, and the launcher shows which features were turned off, for example
+"Turned off 52 new raisable Digimon, Evolution Unbound: they conflict with Digimon
+World 1.5.".
+
+If both sides are enabled anyway (a hand-edited `state.toml`), resolution
+fails with one diagnostic per conflicting pair that names both features, for
+example `dw.1_5/dw15 (Digimon World 1.5) conflicts with
+dw.vanilla.roster/roster (52 new raisable Digimon); turn one of them off`. The launcher
+marks both feature rows.
+
+Package-level `conflicts = ["package.id"]` is unchanged: it still refuses a
+launch with both packages active and is not resolved automatically.
+
 ## State and migration
 
 `mods/state.toml` format 2 stores selected package versions separately from

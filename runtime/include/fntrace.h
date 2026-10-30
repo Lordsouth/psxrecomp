@@ -99,6 +99,10 @@ void fntrace_mark_game_started(CPUState* cpu);
  * (fntrace_set_game_range lo).  No-op before the range is armed and after
  * the latch fires. */
 void fntrace_maybe_mark_game_started(CPUState* cpu, uint32_t addr);
+/* Physical game entry pc while the game-start latch is still armed and
+ * unfired; 0 otherwise. The interpreter uses it to hand a jump to entry_pc
+ * back to the dispatch loop (fntrace_record) instead of chaining into it. */
+uint32_t fntrace_pending_game_entry_phys(void);
 
 /* Arm a target filter. arm_count == 0 means "record all" (default).
  * When arm_count > 0, only dispatches whose target matches one of the

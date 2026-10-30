@@ -50,6 +50,10 @@ void mod_runtime_on_vblank(void);
 void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
                                    uint8_t* bytes, uint32_t size);
 void mod_runtime_enable_disc_patches(void);
+/* One past the last disc LBA the active disc patches provide, or 0 when none
+ * are active. Larger than the stock sector count only when a mod appends
+ * sectors; the ISO wrapper then serves and reports those extra sectors. */
+uint32_t mod_runtime_disc_sector_count(void);
 
 #ifdef __cplusplus
 }

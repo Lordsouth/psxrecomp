@@ -1,5 +1,6 @@
 #include "mod_runtime.h"
 
+#include "crc32.h"
 #include "disc_path.h"
 #include "iso_reader.h"
 #include "mod_packages.h"
@@ -60,6 +61,9 @@ struct RuntimeMods {
     std::map<uint32_t, std::vector<size_t>> user_disc_index;
     std::map<uint32_t, std::vector<size_t>> raw_overlay_index;
     std::map<uint32_t, std::vector<size_t>> user_overlay_index;
+    /* One past the last LBA an overlay covers; extends the served disc when
+     * a mod provides sectors beyond the stock image. */
+    uint32_t disc_sector_extent = 0;
     std::string game_id;
     std::string error;
     std::string exe_sha256;
@@ -149,6 +153,7 @@ void build_disc_index(RuntimeMods& s) {
     s.user_disc_index.clear();
     s.raw_overlay_index.clear();
     s.user_overlay_index.clear();
+    s.disc_sector_extent = 0;
     for (size_t i = 0; i < s.plan.writes.size(); ++i) {
         const ModResolution::Write& write = s.plan.writes[i];
         if (write.target == ModPatchTarget::DiscRaw)
@@ -167,6 +172,8 @@ void build_disc_index(RuntimeMods& s) {
             (overlay.location + overlay.payload.size() - 1) / sector_size;
         for (uint64_t lba = first; lba <= last; ++lba)
             index[(uint32_t)lba].push_back(i);
+        s.disc_sector_extent =
+            std::max(s.disc_sector_extent, (uint32_t)last + 1u);
     }
 }
 
@@ -272,7 +279,7 @@ bool sha256_file(const std::filesystem::path& path, std::string& out,
         return true;
     }
 
-    std::array<uint8_t, 1024 * 1024> buffer{};
+    std::vector<uint8_t> buffer(1024 * 1024);
     std::ifstream file(input, std::ios::binary);
     if (!file) {
         if (error) *error = "cannot fingerprint image: " + input.string();
@@ -608,6 +615,412 @@ bool materialize_derived_disc(RuntimeMods& s, const ModResolution& plan,
     return true;
 }
 
+constexpr size_t kRawSectorBytes = 2352;
+/* Largest image a CD can carry (99 minutes); bounds hostile BPS headers. */
+constexpr uint64_t kMaxDiscImageBytes = 99ull * 60ull * 75ull * kRawSectorBytes;
+
+std::string digest_hex(const uint8_t digest[32]) {
+    static const char hex[] = "0123456789abcdef";
+    std::string out(64, '0');
+    for (size_t i = 0; i < 32; ++i) {
+        out[i * 2] = hex[digest[i] >> 4];
+        out[i * 2 + 1] = hex[digest[i] & 15];
+    }
+    return out;
+}
+
+uint32_t read_le32(const uint8_t* p) {
+    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+           ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+}
+
+void append_le32(std::vector<uint8_t>& out, uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8)
+        out.push_back((uint8_t)(value >> shift));
+}
+
+bool read_whole_file(const std::filesystem::path& path,
+                     std::vector<uint8_t>& out) {
+    std::ifstream in(path, std::ios::binary);
+    if (!in) return false;
+    in.seekg(0, std::ios::end);
+    const std::streamoff size = in.tellg();
+    if (size < 0 || (uint64_t)size > kMaxDiscImageBytes) return false;
+    in.seekg(0);
+    out.resize((size_t)size);
+    return out.empty() || (bool)in.read((char*)out.data(), size);
+}
+
+/* BPS variable-length integer (byuu's format: 7 data bits per byte, high bit
+ * terminates, each continuation adds the next power of 128). */
+bool read_bps_number(const std::vector<uint8_t>& patch, size_t end,
+                     size_t& at, uint64_t& out) {
+    uint64_t data = 0;
+    uint64_t shift = 1;
+    for (int i = 0; i < 9; ++i) {
+        if (at >= end) return false;
+        const uint8_t x = patch[at++];
+        data += (uint64_t)(x & 0x7fu) * shift;
+        if (x & 0x80u) {
+            out = data;
+            return true;
+        }
+        shift <<= 7;
+        data += shift;
+    }
+    return false;
+}
+
+/* Complete BPS applier: all four actions, every offset bounds-checked, and the
+ * patch, source and target CRC32s verified. */
+bool apply_bps(const std::vector<uint8_t>& patch,
+               const std::vector<uint8_t>& source,
+               std::vector<uint8_t>& target, std::string& why) {
+    target.clear();
+    if (patch.size() < 4 + 12 || std::memcmp(patch.data(), "BPS1", 4) != 0) {
+        why = "not a BPS1 patch";
+        return false;
+    }
+    const size_t end = patch.size() - 12;
+    const uint32_t source_crc = read_le32(patch.data() + end);
+    const uint32_t target_crc = read_le32(patch.data() + end + 4);
+    const uint32_t patch_crc = read_le32(patch.data() + end + 8);
+    if (crc32_compute(patch.data(), patch.size() - 4) != patch_crc) {
+        why = "patch CRC32 mismatch (damaged patch file)";
+        return false;
+    }
+    size_t at = 4;
+    uint64_t source_size = 0, target_size = 0, metadata_size = 0;
+    if (!read_bps_number(patch, end, at, source_size) ||
+        !read_bps_number(patch, end, at, target_size) ||
+        !read_bps_number(patch, end, at, metadata_size) ||
+        metadata_size > end - at) {
+        why = "truncated BPS header";
+        return false;
+    }
+    at += (size_t)metadata_size;
+    if (source_size != source.size()) {
+        why = "patch expects a " + std::to_string(source_size) +
+              "-byte source, the disc is " + std::to_string(source.size()) +
+              " bytes";
+        return false;
+    }
+    if (crc32_compute(source.data(), source.size()) != source_crc) {
+        why = "source CRC32 mismatch (not the stock disc)";
+        return false;
+    }
+    if (target_size > kMaxDiscImageBytes) {
+        why = "patch target exceeds a 99-minute CD";
+        return false;
+    }
+    target.assign((size_t)target_size, 0);
+    uint64_t out = 0;
+    int64_t source_relative = 0;
+    int64_t target_relative = 0;
+    while (at < end) {
+        uint64_t data = 0;
+        if (!read_bps_number(patch, end, at, data)) {
+            why = "truncated BPS action";
+            return false;
+        }
+        const uint64_t command = data & 3u;
+        const uint64_t length = (data >> 2) + 1;
+        if (length > target_size - out) {
+            why = "BPS action writes past the target";
+            return false;
+        }
+        if (command == 0) { /* SourceRead: same offset in the source */
+            if (out > source.size() || length > source.size() - out) {
+                why = "BPS SourceRead past the source";
+                return false;
+            }
+            std::memcpy(target.data() + out, source.data() + out,
+                        (size_t)length);
+        } else if (command == 1) { /* TargetRead: literal bytes */
+            if (length > end - at) {
+                why = "BPS TargetRead past the patch";
+                return false;
+            }
+            std::memcpy(target.data() + out, patch.data() + at,
+                        (size_t)length);
+            at += (size_t)length;
+        } else {
+            uint64_t encoded = 0;
+            if (!read_bps_number(patch, end, at, encoded)) {
+                why = "truncated BPS copy offset";
+                return false;
+            }
+            const int64_t magnitude = (int64_t)(encoded >> 1);
+            const int64_t offset = (encoded & 1u) ? -magnitude : magnitude;
+            if (command == 2) { /* SourceCopy: relative source cursor */
+                source_relative += offset;
+                if (source_relative < 0 ||
+                    (uint64_t)source_relative > source.size() ||
+                    length > source.size() - (uint64_t)source_relative) {
+                    why = "BPS SourceCopy outside the source";
+                    return false;
+                }
+                std::memcpy(target.data() + out,
+                            source.data() + source_relative, (size_t)length);
+                source_relative += (int64_t)length;
+            } else { /* TargetCopy: may overlap its own output (RLE) */
+                target_relative += offset;
+                if (target_relative < 0 || (uint64_t)target_relative >= out) {
+                    why = "BPS TargetCopy reads unwritten target bytes";
+                    return false;
+                }
+                for (uint64_t i = 0; i < length; ++i)
+                    target[(size_t)(out + i)] =
+                        target[(size_t)target_relative + (size_t)i];
+                target_relative += (int64_t)length;
+            }
+        }
+        out += length;
+    }
+    if (out != target_size) {
+        why = "patch ended before the target was complete";
+        return false;
+    }
+    if (crc32_compute(target.data(), target.size()) != target_crc) {
+        why = "target CRC32 mismatch";
+        return false;
+    }
+    return true;
+}
+
+/* The derived sectors of one disc delta: every raw sector that differs from
+ * the stock image or lies past its end, ascending by LBA. */
+struct DeltaSectors {
+    std::vector<uint32_t> lbas;
+    std::vector<uint8_t> bytes;
+};
+
+constexpr char kDeltaCacheMagic[8] = {'P', 'S', 'X', 'D', 'D', 'L', 'T', '1'};
+constexpr size_t kDeltaCacheHeader = 8 + 64 + 64 + 4;
+
+std::filesystem::path disc_delta_cache_path(
+    const RuntimeMods& s, const ModResolution::DiscDelta& delta) {
+    return s.manager.root() / "cache" /
+           ("disc_delta_" + delta.source_sha256.substr(0, 16) + "_" +
+            delta.target_sha256.substr(0, 16) + ".sectors");
+}
+
+/* Cache layout: magic, source sha256, target sha256 (ASCII), u32 count,
+ * count x u32 LBA, count x 2352 sector bytes, then the SHA-256 of everything
+ * before it. Anything that does not verify is treated as absent. */
+bool load_delta_cache(const std::filesystem::path& path,
+                      const ModResolution::DiscDelta& delta,
+                      DeltaSectors& out) {
+    std::vector<uint8_t> file;
+    if (!read_whole_file(path, file) || file.size() < kDeltaCacheHeader + 32)
+        return false;
+    uint8_t digest[32];
+    psx_sha256_compute(file.data(), file.size() - 32, digest);
+    if (std::memcmp(digest, file.data() + file.size() - 32, 32) != 0 ||
+        std::memcmp(file.data(), kDeltaCacheMagic, 8) != 0 ||
+        std::memcmp(file.data() + 8, delta.source_sha256.data(), 64) != 0 ||
+        std::memcmp(file.data() + 72, delta.target_sha256.data(), 64) != 0)
+        return false;
+    const uint64_t count = read_le32(file.data() + 136);
+    if (file.size() !=
+        kDeltaCacheHeader + count * (4 + kRawSectorBytes) + 32)
+        return false;
+    out.lbas.resize((size_t)count);
+    for (size_t i = 0; i < count; ++i) {
+        out.lbas[i] = read_le32(file.data() + kDeltaCacheHeader + i * 4);
+        if (i != 0 && out.lbas[i] <= out.lbas[i - 1]) return false;
+    }
+    const uint8_t* bytes = file.data() + kDeltaCacheHeader + count * 4;
+    out.bytes.assign(bytes, bytes + count * kRawSectorBytes);
+    return true;
+}
+
+bool write_delta_cache(const std::filesystem::path& path,
+                       const ModResolution::DiscDelta& delta,
+                       const DeltaSectors& sectors, std::string* error) {
+    std::vector<uint8_t> file(kDeltaCacheMagic, kDeltaCacheMagic + 8);
+    file.insert(file.end(), delta.source_sha256.begin(),
+                delta.source_sha256.end());
+    file.insert(file.end(), delta.target_sha256.begin(),
+                delta.target_sha256.end());
+    append_le32(file, (uint32_t)sectors.lbas.size());
+    for (uint32_t lba : sectors.lbas) append_le32(file, lba);
+    file.insert(file.end(), sectors.bytes.begin(), sectors.bytes.end());
+    uint8_t digest[32];
+    psx_sha256_compute(file.data(), file.size(), digest);
+    file.insert(file.end(), digest, digest + 32);
+
+    std::error_code ec;
+    std::filesystem::create_directories(path.parent_path(), ec);
+    if (ec) {
+        if (error) *error = "cannot create disc-delta cache: " + ec.message();
+        return false;
+    }
+#if defined(_WIN32)
+    const unsigned long process_id = GetCurrentProcessId();
+#else
+    const unsigned long process_id = (unsigned long)getpid();
+#endif
+    std::filesystem::path temporary = path;
+    temporary += ".tmp." + std::to_string(process_id);
+    {
+        std::ofstream out(temporary, std::ios::binary | std::ios::trunc);
+        if (!out.write((const char*)file.data(), (std::streamsize)file.size())) {
+            out.close();
+            std::filesystem::remove(temporary, ec);
+            if (error) *error = "cannot write disc-delta cache: " +
+                                temporary.string();
+            return false;
+        }
+    }
+    std::filesystem::rename(temporary, path, ec);
+    if (ec) {
+        std::filesystem::remove(path, ec);
+        ec.clear();
+        std::filesystem::rename(temporary, path, ec);
+    }
+    if (ec) {
+        std::filesystem::remove(temporary, ec);
+        if (error) *error = "cannot publish disc-delta cache: " + ec.message();
+        return false;
+    }
+    return true;
+}
+
+bool build_delta_sectors(const RuntimeMods& s,
+                         const ModResolution::DiscDelta& delta,
+                         DeltaSectors& out, std::string* error) {
+    std::vector<uint8_t> patch;
+    if (!read_whole_file(delta.file, patch)) {
+        if (error) *error = "cannot read disc delta " + delta.file.string();
+        return false;
+    }
+    /* ponytail: source + target images are both held in RAM (~800 MB peak
+     * for a full CD) only while the first launch builds the cache; a
+     * streaming applier is the upgrade if low-memory hosts matter. */
+    PS1::ISOReader disc;
+    if (!disc.Open(resolve_disc_path(s.disc_path).mount.string())) {
+        if (error) *error = "cannot open the stock disc to apply its delta";
+        return false;
+    }
+    const uint32_t stock_sectors = disc.GetSectorCount();
+    std::vector<uint8_t> source((size_t)stock_sectors * kRawSectorBytes);
+    for (uint32_t lba = 0; lba < stock_sectors; ++lba) {
+        if (!disc.ReadRawSector(
+                lba, source.data() + (size_t)lba * kRawSectorBytes)) {
+            if (error) *error =
+                "disc deltas need a raw 2352-byte image (read failed at LBA " +
+                std::to_string(lba) + ")";
+            return false;
+        }
+    }
+    disc.Close();
+    std::vector<uint8_t> target;
+    std::string why;
+    if (!apply_bps(patch, source, target, why)) {
+        if (error) *error = "BPS disc delta failed: " + why;
+        return false;
+    }
+    patch = {};
+    if (target.size() % kRawSectorBytes != 0 || target.size() < source.size()) {
+        if (error) *error =
+            "disc delta target is not a raw image at least as long as the "
+            "stock disc";
+        return false;
+    }
+    uint8_t digest[32];
+    psx_sha256_compute(target.data(), target.size(), digest);
+    if (digest_hex(digest) != delta.target_sha256) {
+        if (error) *error = "patched disc checksum failed";
+        return false;
+    }
+    out = {};
+    const size_t target_sectors = target.size() / kRawSectorBytes;
+    for (size_t lba = 0; lba < target_sectors; ++lba) {
+        const uint8_t* sector = target.data() + lba * kRawSectorBytes;
+        if (lba < stock_sectors &&
+            std::memcmp(sector, source.data() + lba * kRawSectorBytes,
+                        kRawSectorBytes) == 0)
+            continue;
+        out.lbas.push_back((uint32_t)lba);
+        out.bytes.insert(out.bytes.end(), sector, sector + kRawSectorBytes);
+    }
+    return true;
+}
+
+/* Turn the plan's (single) disc delta into raw overlays: from the verified
+ * cache when present, otherwise by applying the patch to the player's disc.
+ * The overlays are owned by the plan, so a disabled feature retains nothing. */
+bool materialize_disc_delta(RuntimeMods& s, ModResolution& plan,
+                            std::string* error) {
+    if (plan.disc_deltas.empty()) return true;
+    const ModResolution::DiscDelta& delta = plan.disc_deltas.front();
+    const std::string owner = delta.package_id + "/" + delta.feature_id;
+    const std::filesystem::path cached = disc_delta_cache_path(s, delta);
+    DeltaSectors sectors;
+    if (!load_delta_cache(cached, delta, sectors)) {
+        std::fprintf(stdout, "psxrecomp: applying disc delta for %s...\n",
+                     owner.c_str());
+        if (!build_delta_sectors(s, delta, sectors, error)) {
+            if (error) *error = owner + ": " + *error;
+            return false;
+        }
+        if (!write_delta_cache(cached, delta, sectors, error)) return false;
+        std::fprintf(stdout, "psxrecomp: cached disc delta %s (%zu sectors)\n",
+                     cached.string().c_str(), sectors.lbas.size());
+    }
+    const auto owned = [&](uint64_t first, uint64_t last) {
+        const auto at = std::lower_bound(
+            sectors.lbas.begin(), sectors.lbas.end(), first);
+        return at != sectors.lbas.end() && *at <= last;
+    };
+    const auto collision = [&](uint64_t lba, const std::string& package_id,
+                               const std::string& feature_id) {
+        if (error) *error = package_id + "/" + feature_id +
+            " collides at disc LBA " + std::to_string(lba) +
+            " with disc delta " + owner;
+        return false;
+    };
+    for (const ModResolution::Write& write : plan.writes) {
+        if (write.target == ModPatchTarget::MainExe) continue;
+        const uint64_t size =
+            write.target == ModPatchTarget::DiscRaw ? kRawSectorBytes : 2048;
+        const uint64_t first = write.location / size;
+        const uint64_t last =
+            (write.location + write.expected.size() - 1) / size;
+        if (owned(first, last))
+            return collision(first, write.package_id, write.feature_id);
+    }
+    for (const ModResolution::Overlay& overlay : plan.overlays) {
+        const uint64_t size =
+            overlay.target == ModPatchTarget::DiscRaw ? kRawSectorBytes : 2048;
+        const uint64_t first = overlay.location / size;
+        const uint64_t last =
+            (overlay.location + overlay.payload.size() - 1) / size;
+        if (owned(first, last))
+            return collision(first, overlay.package_id, overlay.feature_id);
+    }
+    for (size_t i = 0; i < sectors.lbas.size();) {
+        size_t run_end = i + 1;
+        while (run_end < sectors.lbas.size() &&
+               sectors.lbas[run_end] == sectors.lbas[run_end - 1] + 1)
+            ++run_end;
+        ModResolution::Overlay overlay;
+        overlay.target = ModPatchTarget::DiscRaw;
+        overlay.location = (uint64_t)sectors.lbas[i] * kRawSectorBytes;
+        overlay.payload.assign(
+            sectors.bytes.begin() + (std::ptrdiff_t)(i * kRawSectorBytes),
+            sectors.bytes.begin() +
+                (std::ptrdiff_t)(run_end * kRawSectorBytes));
+        overlay.payload_sha256 = delta.target_sha256;
+        overlay.package_id = delta.package_id;
+        overlay.feature_id = delta.feature_id;
+        plan.overlays.push_back(std::move(overlay));
+        i = run_end;
+    }
+    return true;
+}
+
 #if defined(RECOMP_LAUNCHER)
 void copy_text(char* out, size_t capacity, const std::string& value) {
     if (!out || capacity == 0) return;
@@ -831,15 +1244,36 @@ int provider_feature_choice_get(void*, const char* package_id,
 int provider_feature_enable(void*, const char* package_id,
                             const char* feature_id, int enabled) {
     if (!package_id || !feature_id) return 0;
-    return mutate([&](std::string& error) {
+    std::vector<std::pair<std::string, std::string>> turned_off;
+    const int ok = mutate([&](std::string& error) {
         const ModFeature* feature =
             state().manager.selected_feature(package_id, feature_id);
         if (feature && feature->legacy)
             return state().manager.set_enabled(
                 package_id, enabled != 0, &error);
         return state().manager.set_feature_enabled(
-            package_id, feature_id, enabled != 0, &error);
+            package_id, feature_id, enabled != 0, &error, &turned_off);
     });
+    /* A successful toggle leaves last_error empty; when it turned other
+     * features off, the launcher shows this notice in that same slot. */
+    if (ok && !turned_off.empty()) {
+        const auto name_of = [](const std::string& package,
+                                const std::string& feature) {
+            const ModFeature* found =
+                state().manager.selected_feature(package, feature);
+            return found ? found->name : package + "/" + feature;
+        };
+        std::string notice = "Turned off ";
+        for (size_t i = 0; i < turned_off.size(); ++i) {
+            if (i) notice += ", ";
+            notice += name_of(turned_off[i].first, turned_off[i].second);
+        }
+        notice += turned_off.size() == 1 ? ": it conflicts with "
+                                         : ": they conflict with ";
+        notice += name_of(package_id, feature_id) + ".";
+        state().error = notice;
+    }
+    return ok;
 }
 
 int provider_feature_set_option(void*, const char* package_id,
@@ -1041,6 +1475,7 @@ bool mod_runtime_initialize(const std::filesystem::path& root,
     s.user_disc_index.clear();
     s.raw_overlay_index.clear();
     s.user_overlay_index.clear();
+    s.disc_sector_extent = 0;
     s.game_id.clear();
     s.error.clear();
     s.exe_sha256.clear();
@@ -1081,6 +1516,7 @@ bool mod_runtime_clear_for_netplay(std::string* error) {
     s.user_disc_index.clear();
     s.raw_overlay_index.clear();
     s.user_overlay_index.clear();
+    s.disc_sector_extent = 0;
     s.effective_disc_path.clear();
     s.main_applied = false;
     s.disc_enabled = false;
@@ -1126,6 +1562,10 @@ bool mod_runtime_commit(const std::filesystem::path& disc_path, std::string* err
             if (error) *error = s.error;
             return false;
         }
+    }
+    if (!materialize_disc_delta(s, plan, &s.error)) {
+        if (error) *error = s.error;
+        return false;
     }
     std::filesystem::path effective_disc;
     if (!materialize_derived_disc(s, plan, effective_disc, &s.error)) {
@@ -1228,6 +1668,13 @@ extern "C" void mod_runtime_on_savestate_loaded(void) {
 
 extern "C" void mod_runtime_enable_disc_patches(void) {
     PSXRecompV4::state().disc_enabled = true;
+}
+
+extern "C" uint32_t mod_runtime_disc_sector_count(void) {
+    using namespace PSXRecompV4;
+    const RuntimeMods& s = state();
+    if (!s.initialized || !s.disc_enabled || s.disc_guard_failed) return 0;
+    return s.disc_sector_extent;
 }
 
 extern "C" void mod_runtime_activate_plugins(void) {

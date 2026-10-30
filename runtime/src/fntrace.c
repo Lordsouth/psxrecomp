@@ -47,6 +47,10 @@ void fntrace_set_game_range(uint32_t lo, uint32_t hi) {
 
 int fntrace_is_game_started(void) { return s_game_started; }
 
+uint32_t fntrace_pending_game_entry_phys(void) {
+    return s_game_started ? 0u : s_game_entry_phys;
+}
+
 /* Centralised game-start transition.  Idempotent — safe to call from both
  * the dispatcher (fntrace_record) and the generated entry-point function.
  * Performs the complete handoff side effects: dirty-image baseline clear,

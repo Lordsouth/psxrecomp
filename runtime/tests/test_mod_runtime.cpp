@@ -1,9 +1,12 @@
 #include "mod_runtime.h"
 #include "mod_packages.h"
+#include "crc32.h"
 #include "psx_sha256.h"
 
 #include <array>
+#include <chrono>
 #include <cstdint>
+#include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
@@ -11,6 +14,14 @@
 #include <vector>
 
 namespace fs = std::filesystem;
+
+extern "C" {
+void* iso_open(const char* path);
+int iso_read_sector(void* handle, uint32_t lba, uint8_t* buffer, int size);
+int iso_read_raw_sector(void* handle, uint32_t lba, uint8_t* buffer, int size);
+uint32_t iso_sector_count(void* handle);
+void iso_close(void* handle);
+}
 
 static std::array<uint8_t, 2 * 1024 * 1024> ram;
 static int failures;
@@ -57,6 +68,10 @@ extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t, uint32_t) {
     return 0;
 }
 extern "C" int psx_ws_x_margin(void) { return 0; }
+extern "C" int ws_nw_extra(void) { return 0; }
+extern "C" int gpu_mod_vram_write(uint32_t, uint32_t, uint32_t, uint32_t,
+                                  const uint16_t*) { return 0; }
+extern "C" int psx_cheats_set_enabled(const char*, int) { return 0; }
 
 extern "C" void dirty_ram_mark_executable_range(uint32_t, uint32_t) {}
 extern "C" int fntrace_is_game_started(void) { return 1; }
@@ -88,9 +103,7 @@ static void write_bytes(const fs::path& path, const std::vector<uint8_t>& bytes)
     out.write((const char*)bytes.data(), (std::streamsize)bytes.size());
 }
 
-static std::string sha256_hex(const std::vector<uint8_t>& bytes) {
-    uint8_t digest[32];
-    psx_sha256_compute(bytes.data(), bytes.size(), digest);
+static std::string digest_hex(const uint8_t digest[32]) {
     static const char hex[] = "0123456789abcdef";
     std::string out(64, '0');
     for (size_t i = 0; i < 32; ++i) {
@@ -100,7 +113,338 @@ static std::string sha256_hex(const std::vector<uint8_t>& bytes) {
     return out;
 }
 
-int main() {
+static std::string sha256_hex(const std::vector<uint8_t>& bytes) {
+    uint8_t digest[32];
+    psx_sha256_compute(bytes.data(), bytes.size(), digest);
+    return digest_hex(digest);
+}
+
+/* Minimal BPS writer: enough to emit every action the runtime applier must
+ * handle (SourceRead, TargetRead, SourceCopy, TargetCopy). */
+static void bps_number(std::vector<uint8_t>& out, uint64_t value) {
+    for (;;) {
+        const uint8_t x = (uint8_t)(value & 0x7f);
+        value >>= 7;
+        if (value == 0) {
+            out.push_back((uint8_t)(0x80 | x));
+            return;
+        }
+        out.push_back(x);
+        value--;
+    }
+}
+
+static void bps_action(std::vector<uint8_t>& patch, unsigned command,
+                       uint64_t length) {
+    bps_number(patch, ((length - 1) << 2) | command);
+}
+
+static void bps_offset(std::vector<uint8_t>& patch, int64_t offset) {
+    bps_number(patch, ((uint64_t)(offset < 0 ? -offset : offset) << 1) |
+                          (offset < 0 ? 1u : 0u));
+}
+
+static void bps_le32(std::vector<uint8_t>& patch, uint32_t value) {
+    for (int shift = 0; shift < 32; shift += 8)
+        patch.push_back((uint8_t)(value >> shift));
+}
+
+static std::vector<uint8_t> read_bytes(const fs::path& path) {
+    std::ifstream in(path, std::ios::binary);
+    return std::vector<uint8_t>(std::istreambuf_iterator<char>(in), {});
+}
+
+static std::string delta_manifest(const std::string& source_sha256,
+                                  const std::string& target_sha256) {
+    return
+        "format_version = 6\n"
+        "id = \"delta.test\"\n"
+        "version = \"1.0.0\"\n"
+        "name = \"Delta Test\"\n"
+        "[[target]]\n"
+        "game_id = \"SLUS-DELTA\"\n"
+        "[[feature]]\n"
+        "id = \"remaster\"\n"
+        "name = \"Remaster\"\n"
+        "[[feature]]\n"
+        "id = \"collide\"\n"
+        "name = \"Collide\"\n"
+        "[[patch]]\n"
+        "feature = \"collide\"\n"
+        "target = \"disc_raw\"\n"
+        "offset = 2452\n"
+        "expected = \"" + std::string(2, '0') + "\"\n"
+        "replace = \"ff\"\n"
+        "[[disc_delta]]\n"
+        "feature = \"remaster\"\n"
+        "format = \"bps\"\n"
+        "file = \"assets/remaster.bps\"\n"
+        "source_sha256 = \"" + source_sha256 + "\"\n"
+        "target_sha256 = \"" + target_sha256 + "\"\n";
+}
+
+static void write_delta_state(const fs::path& root, bool remaster,
+                              bool collide) {
+    write_text(root / "state.toml",
+        std::string("format_version = 2\n"
+        "[[package]]\n"
+        "id = \"delta.test\"\n"
+        "version = \"1.0.0\"\n"
+        "[[feature]]\n"
+        "package_id = \"delta.test\"\n"
+        "id = \"remaster\"\n"
+        "enabled = ") + (remaster ? "true" : "false") + "\n"
+        "[[feature]]\n"
+        "package_id = \"delta.test\"\n"
+        "id = \"collide\"\n"
+        "enabled = " + (collide ? "true" : "false") + "\n");
+}
+
+static bool commit_delta(const fs::path& root, const fs::path& disc,
+                         std::string& error) {
+    error.clear();
+    if (!PSXRecompV4::mod_runtime_initialize(
+            root, "SLUS-DELTA", 0x80002000, {}, &error))
+        return false;
+    if (!PSXRecompV4::mod_runtime_commit(disc, &error)) return false;
+    mod_runtime_enable_disc_patches();
+    return true;
+}
+
+static bool disc_serves(const fs::path& disc,
+                        const std::vector<uint8_t>& expected) {
+    void* handle = iso_open(disc.string().c_str());
+    if (!handle) return false;
+    const uint32_t sectors = (uint32_t)(expected.size() / 2352);
+    bool ok = iso_sector_count(handle) == sectors;
+    std::array<uint8_t, 2352> raw{};
+    for (uint32_t lba = 0; ok && lba < sectors; ++lba)
+        ok = iso_read_raw_sector(handle, lba, raw.data(), 2352) &&
+             std::memcmp(raw.data(), expected.data() + (size_t)lba * 2352,
+                         2352) == 0;
+    ok = ok && !iso_read_raw_sector(handle, sectors, raw.data(), 2352);
+    iso_close(handle);
+    return ok;
+}
+
+static void test_disc_delta() {
+    const fs::path root =
+        fs::temp_directory_path() / "psxrecomp-mod-runtime-delta-test";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+
+    /* Four stock Mode2 Form1 sectors. The patched image changes sector 1 and
+     * appends sectors 4 and 5, past the stock end. */
+    std::vector<uint8_t> stock(4 * 2352);
+    for (size_t i = 0; i < stock.size(); ++i)
+        stock[i] = (uint8_t)(i * 7u + i / 2352u * 31u);
+    for (size_t lba = 0; lba < 4; ++lba) {
+        stock[lba * 2352 + 15] = 2;
+        stock[lba * 2352 + 18] = 0;
+        stock[lba * 2352 + 100] = 0; /* the "collide" patch guard */
+    }
+    std::vector<uint8_t> target(stock);
+    target.resize(6 * 2352);
+    for (size_t i = 0; i < 2352; ++i) {
+        if (i != 15 && i != 18) target[2352 + i] = (uint8_t)(i * 13u + 5u);
+        target[4 * 2352 + i] = (uint8_t)(i * 3u + 1u);
+    }
+    target[4 * 2352 + 15] = 2;
+    target[4 * 2352 + 18] = 0;
+    for (size_t i = 0; i < 1176; ++i) {
+        target[5 * 2352 + i] = target[4 * 2352 + i];
+        target[5 * 2352 + 1176 + i] = stock[1176 + i];
+    }
+
+    std::vector<uint8_t> patch = {'B', 'P', 'S', '1'};
+    bps_number(patch, stock.size());
+    bps_number(patch, target.size());
+    bps_number(patch, 0);
+    bps_action(patch, 0, 2352);                       /* sector 0 */
+    bps_action(patch, 1, 2352);                       /* sector 1 */
+    patch.insert(patch.end(), target.begin() + 2352, target.begin() + 4704);
+    bps_action(patch, 0, 2 * 2352);                   /* sectors 2-3 */
+    bps_action(patch, 1, 2352);                       /* sector 4 */
+    patch.insert(patch.end(), target.begin() + 4 * 2352,
+                 target.begin() + 5 * 2352);
+    bps_action(patch, 3, 1176);                       /* sector 5 head */
+    bps_offset(patch, 4 * 2352);
+    bps_action(patch, 2, 1176);                       /* sector 5 tail */
+    bps_offset(patch, 1176);
+    bps_le32(patch, crc32_compute(stock.data(), stock.size()));
+    bps_le32(patch, crc32_compute(target.data(), target.size()));
+    bps_le32(patch, crc32_compute(patch.data(), patch.size()));
+
+    const fs::path stock_path = root / "stock.bin";
+    write_bytes(stock_path, stock);
+    const fs::path package = root / "packages/delta.test/1.0.0";
+    write_bytes(package / "assets/remaster.bps", patch);
+    write_text(package / "manifest.toml",
+               delta_manifest(sha256_hex(stock), sha256_hex(target)));
+    const fs::path cache = root / "cache";
+    std::string error;
+
+    write_delta_state(root, false, false);
+    check(commit_delta(root, stock_path, error), error.c_str());
+    const std::string vanilla_fingerprint =
+        PSXRecompV4::mod_runtime_fingerprint();
+    check(mod_runtime_disc_sector_count() == 0,
+          "a disabled disc delta must not extend the disc");
+    check(disc_serves(stock_path, stock),
+          "a disabled disc delta must serve the stock image byte for byte");
+    check(!fs::exists(cache), "a disabled disc delta must not build a cache");
+
+    write_delta_state(root, true, false);
+    check(commit_delta(root, stock_path, error), error.c_str());
+    check(PSXRecompV4::mod_runtime_fingerprint() != vanilla_fingerprint,
+          "an enabled disc delta must change the plan fingerprint");
+    check(mod_runtime_disc_sector_count() == 6,
+          "appended delta sectors must extend the disc");
+    check(disc_serves(stock_path, target),
+          "the enabled delta must serve the complete patched image, "
+          "including sectors past the stock end");
+    {
+        void* handle = iso_open(stock_path.string().c_str());
+        std::array<uint8_t, 2048> user{};
+        check(handle && iso_read_sector(handle, 4, user.data(), 2048) &&
+                  std::memcmp(user.data(), target.data() + 4 * 2352 + 24,
+                              2048) == 0,
+              "cooked reads of an appended sector must serve its user data");
+        iso_close(handle);
+    }
+    fs::path cache_file;
+    for (const fs::directory_entry& entry :
+         fs::directory_iterator(cache, ec))
+        cache_file = entry.path();
+    check(!cache_file.empty() && cache_file.extension() == ".sectors",
+          "the derived sectors must be cached");
+
+    /* A later launch takes the verified cache and never touches the patch. */
+    write_bytes(package / "assets/remaster.bps", std::vector<uint8_t>(64, 0));
+    check(commit_delta(root, stock_path, error), error.c_str());
+    check(disc_serves(stock_path, target),
+          "a cached disc delta must serve the same patched image");
+
+    /* A damaged cache is rebuilt, which here exposes the damaged patch. */
+    std::vector<uint8_t> cached = read_bytes(cache_file);
+    cached[cached.size() / 2] ^= 0x40;
+    write_bytes(cache_file, cached);
+    check(!commit_delta(root, stock_path, error) &&
+              error.find("not a BPS1 patch") != std::string::npos,
+          "a damaged cache must not be served");
+    std::vector<uint8_t> damaged(patch);
+    damaged[40] ^= 0x01;
+    write_bytes(package / "assets/remaster.bps", damaged);
+    check(!commit_delta(root, stock_path, error) &&
+              error.find("patch CRC32") != std::string::npos,
+          "a damaged BPS must fail its patch CRC32");
+    write_bytes(package / "assets/remaster.bps", patch);
+    check(commit_delta(root, stock_path, error), error.c_str());
+    check(disc_serves(stock_path, target),
+          "a rebuilt cache must serve the patched image");
+
+    /* The delta's own target hash is checked after the BPS CRCs pass. */
+    fs::remove_all(cache, ec);
+    std::vector<uint8_t> wrong_target(target);
+    wrong_target[0] ^= 1;
+    write_text(package / "manifest.toml",
+               delta_manifest(sha256_hex(stock), sha256_hex(wrong_target)));
+    check(!commit_delta(root, stock_path, error) &&
+              error.find("patched disc checksum failed") != std::string::npos,
+          "a target hash mismatch must refuse the delta");
+    write_text(package / "manifest.toml",
+               delta_manifest(sha256_hex(stock), sha256_hex(target)));
+
+    /* Any other disc refuses loudly before anything is applied. */
+    std::vector<uint8_t> other(stock);
+    other[5000] ^= 0xff;
+    const fs::path other_path = root / "other.bin";
+    write_bytes(other_path, other);
+    check(!commit_delta(root, other_path, error) &&
+              error.find("needs the stock disc") != std::string::npos,
+          "a disc delta must refuse a non-matching source disc");
+
+    /* Another feature touching a delta-owned sector collides. */
+    write_delta_state(root, true, true);
+    check(!commit_delta(root, stock_path, error) &&
+              error.find("collides at disc LBA 1") != std::string::npos,
+          "a disc write inside a delta sector must collide");
+
+    /* Turning the feature off drops every derived sector again. */
+    write_delta_state(root, false, false);
+    check(commit_delta(root, stock_path, error), error.c_str());
+    check(mod_runtime_disc_sector_count() == 0 &&
+              disc_serves(stock_path, stock),
+          "disabling the delta must restore the stock image");
+
+    fs::remove_all(root, ec);
+}
+
+/* End-to-end: run the real runtime path (manifest -> resolution -> BPS apply
+ * -> cache -> ISO wrapper reads) over a full disc image and hash every sector
+ * the CD controller would see. Driven by tools/check_disc_delta_e2e.py. */
+static int disc_delta_e2e(const fs::path& disc, const fs::path& bps,
+                          const std::string& source_sha256,
+                          const std::string& target_sha256) {
+    const fs::path root =
+        fs::temp_directory_path() / "psxrecomp-disc-delta-e2e";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    const fs::path package = root / "packages/delta.test/1.0.0";
+    fs::create_directories(package / "assets");
+    fs::copy_file(bps, package / "assets/remaster.bps", ec);
+    if (ec) {
+        std::cerr << "cannot stage patch: " << ec.message() << "\n";
+        return 1;
+    }
+    write_text(package / "manifest.toml",
+               delta_manifest(source_sha256, target_sha256));
+    write_delta_state(root, true, false);
+
+    int result = 0;
+    for (const char* pass : {"cold (apply + cache)", "warm (cache hit)"}) {
+        std::string error;
+        const auto start = std::chrono::steady_clock::now();
+        if (!commit_delta(root, disc, error)) {
+            std::cerr << pass << ": commit failed: " << error << "\n";
+            result = 1;
+            break;
+        }
+        const double seconds = std::chrono::duration<double>(
+            std::chrono::steady_clock::now() - start).count();
+        void* handle = iso_open(disc.string().c_str());
+        const uint32_t sectors = handle ? iso_sector_count(handle) : 0;
+        psx_sha256_ctx hash;
+        psx_sha256_init(&hash);
+        std::array<uint8_t, 2352> raw{};
+        uint32_t lba = 0;
+        for (; lba < sectors; ++lba) {
+            if (!iso_read_raw_sector(handle, lba, raw.data(), 2352)) break;
+            psx_sha256_update(&hash, raw.data(), raw.size());
+        }
+        const bool past_end =
+            handle && iso_read_raw_sector(handle, sectors, raw.data(), 2352);
+        iso_close(handle);
+        uint8_t digest[32];
+        psx_sha256_final(&hash, digest);
+        const std::string served = digest_hex(digest);
+        const bool ok = lba == sectors && !past_end && served == target_sha256;
+        std::cout << pass << ": commit " << seconds << " s, served "
+                  << sectors << " sectors, sha256 " << served
+                  << (ok ? " == target" : " != target") << "\n";
+        if (!ok) result = 1;
+    }
+    for (const fs::directory_entry& entry :
+         fs::directory_iterator(root / "cache", ec))
+        std::cout << "cache: " << entry.path().filename().string() << " "
+                  << fs::file_size(entry.path(), ec) << " bytes\n";
+    fs::remove_all(root, ec);
+    return result;
+}
+
+int main(int argc, char** argv) {
+    if (argc == 6 && std::string(argv[1]) == "--disc-delta-e2e")
+        return disc_delta_e2e(argv[2], argv[3], argv[4], argv[5]);
     const fs::path root = fs::temp_directory_path() / "psxrecomp-mod-runtime-test";
     std::error_code ec;
     fs::remove_all(root, ec);
@@ -461,6 +805,7 @@ int main() {
           "untouched");
 
     fs::remove_all(root, ec);
+    test_disc_delta();
     if (failures) return 1;
     std::cout << "mod runtime tests passed\n";
     return 0;

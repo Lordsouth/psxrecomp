@@ -27,6 +27,12 @@ typedef struct {
  * only used to derive default paths for slots whose path is NULL. */
 void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]);
 
+/* Mod-requested card subfolder (psx_mod_set_memcard_subdir in mod_plugins.h).
+ * memcard_init_slots places both cards under <dir>/<subdir>/ while it is set.
+ * Clear before each mod activation pass; "" when none is requested. */
+void        memcard_clear_mod_subdir(void);
+const char* memcard_mod_subdir(void);
+
 /* Stateless on-disk introspection (used by the launcher before boot). Parses a
  * .mcd file's directory frames without touching the live card array. */
 typedef struct {

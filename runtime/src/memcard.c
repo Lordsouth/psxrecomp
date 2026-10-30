@@ -117,8 +117,69 @@ static void memcard_ensure_dir(const char* dir) {
 #endif
 }
 
+/* Card subfolder requested by a mod activation callback (mod_plugins.h), for
+ * a mod whose saves must not mix with the stock game's. main.cpp clears it
+ * before every activation pass, so a session with the mod off starts clean,
+ * and it survives a rematch that re-inits cards without re-activating. */
+static char s_mod_subdir[64];
+
+void memcard_clear_mod_subdir(void) { s_mod_subdir[0] = '\0'; }
+
+const char* memcard_mod_subdir(void) { return s_mod_subdir; }
+
+int psx_mod_set_memcard_subdir(const char* name) {
+    size_t i;
+    if (!name || !name[0] || strlen(name) >= sizeof(s_mod_subdir)) return 0;
+    for (i = 0; name[i]; i++) {
+        const char c = name[i];
+        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'))
+            return 0;
+    }
+    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 0;
+    snprintf(s_mod_subdir, sizeof(s_mod_subdir), "%s", name);
+    return 1;
+}
+
+/* <parent of path>/<subdir>/<file name of path>. */
+static void memcard_subdir_path(char* out, size_t n, const char* path) {
+    const char* slash = strrchr(path, '/');
+    const char* bslash = strrchr(path, '\\');
+    if (bslash && (!slash || bslash > slash)) slash = bslash;
+    if (slash)
+        snprintf(out, n, "%.*s/%s/%s", (int)(slash - path), path,
+                 s_mod_subdir, slash + 1);
+    else
+        snprintf(out, n, "%s/%s", s_mod_subdir, path);
+}
+
 void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]) {
+    char moddir[512];
+    char modpath[2][512];
+    MemcardSlotConfig modslots[2];
     memset(cards, 0, sizeof(cards));
+    if (s_mod_subdir[0]) {
+        int i;
+        if (dir) {
+            snprintf(moddir, sizeof(moddir), "%s/%s", dir, s_mod_subdir);
+            dir = moddir;
+        }
+        for (i = 0; i < MAX_CARDS; i++) {
+            modslots[i].enabled = slots ? slots[i].enabled : 1;
+            modslots[i].path = NULL;
+            if (slots && slots[i].path && slots[i].path[0]) {
+                memcard_subdir_path(modpath[i], sizeof(modpath[i]),
+                                    slots[i].path);
+                char parent[512];
+                char* cut;
+                snprintf(parent, sizeof(parent), "%s", modpath[i]);
+                cut = strrchr(parent, '/');
+                if (cut) { *cut = '\0'; memcard_ensure_dir(parent); }
+                modslots[i].path = modpath[i];
+            }
+        }
+        slots = modslots;
+    }
     memcard_ensure_dir(dir);
 
     for (int i = 0; i < MAX_CARDS; i++) {

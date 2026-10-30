@@ -16,6 +16,7 @@
 #define PSXRECOMP_DIRTY_RAM_INTERP_H
 
 #include <stdint.h>
+#include <string.h>
 #include "cpu_state.h"
 
 #ifdef __cplusplus
@@ -95,6 +96,9 @@ void dirty_ram_irq_ambient_resync_after_restore(void);
  * bail-prone non-local-call contract — the Whoopee-Camp splash freeze. main.cpp
  * sets g_overlay_region_floor = (load_address + text_size) & 0x1FFFFFFF at game
  * load; OVERLAY_REGION_FLOOR_DEFAULT applies for BIOS-only runs. */
+/* The floor stays at the COMPILED text end even when the EXE the BIOS actually
+ * loads is larger (a modded boot EXE with a bigger t_size): bytes past the
+ * compiled end have no native body by construction, so they are overlay code. */
 #define OVERLAY_REGION_FLOOR_DEFAULT 0x00098000u
 extern uint32_t g_overlay_region_floor;
 #define OVERLAY_REGION_FLOOR (g_overlay_region_floor)
@@ -152,6 +156,18 @@ int      dirty_ram_text_native_ok_ranges_from(const uint32_t *lo_len_pairs,
 int      dirty_ram_text_native_ok_ranges(const uint32_t *lo_len_pairs,
                                         uint32_t count);
 int      dirty_ram_text_image_registered(void);
+/* Compiled-image divergence test for one text range (used per page by
+ * dirty_ram_clear_image_baseline). 1 iff some byte of [lo, hi) that the
+ * compiled reference image [ref_lo, ref_hi) covers differs in live RAM; bytes
+ * the reference does not cover are not compiled text and never count. `ram`
+ * and the addresses are physical. Pure, so tests can feed real EXE images. */
+static inline int dirty_ram_range_diverges_from_image(
+        const uint8_t *ram, const uint8_t *ref, uint32_t ref_lo,
+        uint32_t ref_hi, uint32_t lo, uint32_t hi) {
+    if (lo < ref_lo) lo = ref_lo;
+    if (hi > ref_hi) hi = ref_hi;
+    return lo < hi && memcmp(ram + lo, ref + (lo - ref_lo), hi - lo) != 0;
+}
 /* Bless an intentional runtime data patch (e.g. text_xlate string/glyph tables)
  * into the text reference image so it is not mistaken for self-modifying code. */
 void     dirty_ram_text_bless(uint32_t phys, const uint8_t *bytes, uint32_t len);

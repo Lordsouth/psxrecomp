@@ -178,6 +178,12 @@ if(BUILD_TESTING)
     target_include_directories(bios_hle_plan_test PRIVATE include)
     add_test(NAME bios_hle_plan_test COMMAND bios_hle_plan_test)
 
+    # A boot EXE that differs from the compiled one keeps exactly its differing
+    # text pages dirty at game start (dirty_ram_clear_image_baseline).
+    add_executable(exe_divergence_pages_test tests/test_exe_divergence_pages.c)
+    target_include_directories(exe_divergence_pages_test PRIVATE include)
+    add_test(NAME exe_divergence_pages_test COMMAND exe_divergence_pages_test)
+
     # A cue, conventional raw image, or Steam .car image is a valid pick; each
     # must mount the same disc and identify off the same data track.
     add_executable(disc_path_resolve_test
@@ -226,6 +232,7 @@ if(BUILD_TESTING)
     add_executable(mod_runtime_test
         tests/test_mod_runtime.cpp
         src/mod_runtime.cpp
+        src/iso_reader_c.cpp
         src/mod_packages.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp

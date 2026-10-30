@@ -22,7 +22,7 @@ namespace PSXRecompV4 {
 namespace {
 
 constexpr uint32_t kMinFormatVersion = 1;
-constexpr uint32_t kMaxFormatVersion = 5;
+constexpr uint32_t kMaxFormatVersion = 6;
 constexpr uint64_t kMaxArchiveBytes = 256ull * 1024ull * 1024ull;
 constexpr uint32_t kMaxArchiveFiles = 4096;
 
@@ -679,6 +679,7 @@ std::string canonical_resolution(const std::vector<const ModPackage*>& ordered,
                                  const std::vector<ModResolution::Write>& writes,
                                  const std::vector<ModResolution::Overlay>& overlays,
                                  const std::vector<ModResolution::DerivedDisc>& derived_discs,
+                                 const std::vector<ModResolution::DiscDelta>& disc_deltas,
                                  const std::vector<ModResolution::Plugin>& plugins,
                                  const std::string& source_disc_sha256) {
     std::ostringstream out;
@@ -749,6 +750,11 @@ std::string canonical_resolution(const std::vector<const ModPackage*>& ordered,
             << derived.patch_sha256 << ':' << derived.output_size << ':'
             << derived.output_sha256 << ':' << derived.package_id << '\n';
     }
+    for (const ModResolution::DiscDelta& delta : disc_deltas) {
+        out << "disc_delta:" << delta.format << ':' << delta.source_sha256
+            << '>' << delta.target_sha256 << ':' << delta.package_id << ':'
+            << delta.feature_id << '\n';
+    }
     for (const ModResolution::Plugin& plugin : plugins) {
         out << "plugin:" << plugin.id << ':' << plugin.package_id << ':'
             << plugin.feature_id << '\n';
@@ -794,6 +800,17 @@ bool is_feature_enabled(const ModPackage& package, const ModSelection& selection
         find_feature_selection(package, selection, feature.id);
     return selected && selected->has_enabled
         ? selected->enabled : feature.default_enabled;
+}
+
+/* Feature conflicts are symmetric: either side naming the other suffices. */
+bool features_conflict(const ModPackage& a, const ModFeature& feature_a,
+                       const ModPackage& b, const ModFeature& feature_b) {
+    const std::string a_key = a.id + "/" + feature_a.id;
+    const std::string b_key = b.id + "/" + feature_b.id;
+    return std::find(feature_a.conflicts.begin(), feature_a.conflicts.end(),
+                     b_key) != feature_a.conflicts.end() ||
+           std::find(feature_b.conflicts.begin(), feature_b.conflicts.end(),
+                     a_key) != feature_b.conflicts.end();
 }
 
 bool has_enabled_feature(const ModPackage& package,
@@ -1544,6 +1561,25 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                     throw std::runtime_error("invalid or duplicate feature id");
                 if (feature.name.empty())
                     throw std::runtime_error("feature name is empty");
+                if (v.contains("conflicts")) {
+                    if (out.format_version < 6)
+                        throw std::runtime_error(
+                            "feature conflicts require format_version 6");
+                    feature.conflicts =
+                        toml::find<std::vector<std::string>>(v, "conflicts");
+                    for (const std::string& key : feature.conflicts) {
+                        const size_t slash = key.find('/');
+                        if (slash == std::string::npos ||
+                            !valid_id(key.substr(0, slash)) ||
+                            !valid_id(key.substr(slash + 1)))
+                            throw std::runtime_error(
+                                "feature conflict must be "
+                                "\"package_id/feature_id\": " + key);
+                        if (key == out.id + "/" + feature.id)
+                            throw std::runtime_error(
+                                "feature conflicts with itself: " + key);
+                    }
+                }
                 out.features.push_back(std::move(feature));
             }
             if (out.features.empty())
@@ -2224,6 +2260,47 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                 out.derived_discs.push_back(std::move(derived));
             }
         }
+        if (cfg.contains("disc_delta")) {
+            if (!feature_style)
+                throw std::runtime_error(
+                    "disc deltas require explicit [[feature]] ownership");
+            if (out.format_version < 6)
+                throw std::runtime_error(
+                    "disc deltas require format_version 6");
+            for (const toml::value& v :
+                 toml::find(cfg, "disc_delta").as_array()) {
+                ModDiscDelta delta;
+                delta.feature_id = toml::find<std::string>(v, "feature");
+                if (!find_feature(out, delta.feature_id))
+                    throw std::runtime_error(
+                        "disc_delta references unknown feature");
+                delta.format = toml::find<std::string>(v, "format");
+                if (delta.format != "bps")
+                    throw std::runtime_error("disc_delta format must be bps");
+                const std::string relative_file =
+                    toml::find<std::string>(v, "file");
+                if (!safe_archive_name(relative_file))
+                    throw std::runtime_error("disc_delta file path is unsafe");
+                delta.file = out.root / fs::path(relative_file);
+                delta.source_sha256 =
+                    toml::find<std::string>(v, "source_sha256");
+                delta.target_sha256 =
+                    toml::find<std::string>(v, "target_sha256");
+                if (!valid_sha256(delta.source_sha256) ||
+                    !valid_sha256(delta.target_sha256))
+                    throw std::runtime_error(
+                        "disc_delta hashes must be lowercase SHA-256");
+                if (delta.source_sha256 == delta.target_sha256)
+                    throw std::runtime_error(
+                        "disc_delta source and target are identical");
+                if (!fs::is_regular_file(delta.file))
+                    throw std::runtime_error(
+                        "disc_delta patch asset is missing: " + relative_file);
+                read_conditions(v, out.options, delta.feature_id,
+                                delta.when, "disc_delta");
+                out.disc_deltas.push_back(std::move(delta));
+            }
+        }
         return true;
     } catch (const std::exception& ex) {
         set_error(error, path.string() + ": " + ex.what());
@@ -2578,10 +2655,11 @@ bool ModPackageManager::set_option(const std::string& id, const std::string& opt
     return true;
 }
 
-bool ModPackageManager::set_feature_enabled(const std::string& package_id,
-                                            const std::string& feature_id,
-                                            bool enabled,
-                                            std::string* error) {
+bool ModPackageManager::set_feature_enabled(
+    const std::string& package_id, const std::string& feature_id,
+    bool enabled, std::string* error,
+    std::vector<std::pair<std::string, std::string>>* turned_off) {
+    if (turned_off) turned_off->clear();
     const ModPackage* package = selected_package(package_id);
     const ModFeature* feature =
         package ? find_feature(*package, feature_id) : nullptr;
@@ -2589,7 +2667,17 @@ bool ModPackageManager::set_feature_enabled(const std::string& package_id,
         set_error(error, "unknown package feature");
         return false;
     }
-    ModSelection package_selection = selections_[package_id];
+    /* Stage every touched package's selection; publish only if all hold. */
+    std::map<std::string, ModSelection> staged;
+    const auto stage = [&](const std::string& id) -> ModSelection& {
+        auto found = staged.find(id);
+        if (found != staged.end()) return found->second;
+        const auto current = selections_.find(id);
+        return staged.emplace(id, current == selections_.end()
+                                      ? ModSelection{} : current->second)
+            .first->second;
+    };
+    ModSelection& package_selection = stage(package_id);
     if (enabled) {
         std::set<std::string> visiting;
         if (!apply_feature_requirements(
@@ -2599,17 +2687,68 @@ bool ModPackageManager::set_feature_enabled(const std::string& package_id,
     set_feature_selected(package_selection, feature_id, enabled);
     if (!enabled)
         cascade_unsatisfied_feature_requirements(*package, package_selection);
-    std::string failing_feature;
-    std::string reason;
-    if (!package_constraints_satisfied(
-            *package, package_selection, nullptr, nullptr, nullptr, nullptr,
-            nullptr, &failing_feature, &reason)) {
-        set_error(error, package_id + "/" +
-            (failing_feature.empty() ? feature_id : failing_feature) +
-            ": " + reason);
-        return false;
+    if (enabled) {
+        /* Last action wins: every feature this action switched on turns off
+         * whatever enabled feature it conflicts with, in any package. */
+        const auto before = selections_.find(package_id);
+        const ModSelection blank;
+        const ModSelection& previous =
+            before == selections_.end() ? blank : before->second;
+        std::vector<const ModFeature*> switched_on;
+        for (const ModFeature& candidate : package->features)
+            if (is_feature_enabled(*package, package_selection, candidate) &&
+                !is_feature_enabled(*package, previous, candidate))
+                switched_on.push_back(&candidate);
+        for (const auto& [other_id, versions] : packages_) {
+            (void)versions;
+            const ModPackage* other = selected_package(other_id);
+            if (!other) continue;
+            for (const ModFeature& victim : other->features) {
+                const bool conflicts = std::any_of(
+                    switched_on.begin(), switched_on.end(),
+                    [&](const ModFeature* on) {
+                        return on != &victim &&
+                               features_conflict(*package, *on, *other, victim);
+                    });
+                if (!conflicts) continue;
+                ModSelection& selection = stage(other_id);
+                if (!is_feature_enabled(*other, selection, victim)) continue;
+                if (victim.legacy)
+                    selection.enabled = false;
+                else
+                    set_feature_selected(selection, victim.id, false);
+                cascade_unsatisfied_feature_requirements(*other, selection);
+            }
+        }
     }
-    selections_[package_id] = std::move(package_selection);
+    for (const auto& [id, selection] : staged) {
+        const ModPackage* touched = selected_package(id);
+        std::string failing_feature;
+        std::string reason;
+        if (touched && !package_constraints_satisfied(
+                *touched, selection, nullptr, nullptr, nullptr, nullptr,
+                nullptr, &failing_feature, &reason)) {
+            set_error(error, id + "/" +
+                (failing_feature.empty() ? feature_id : failing_feature) +
+                ": " + reason);
+            return false;
+        }
+    }
+    for (auto& [id, selection] : staged) {
+        const ModPackage* touched = selected_package(id);
+        if (turned_off && touched) {
+            const auto current = selections_.find(id);
+            const ModSelection blank;
+            const ModSelection& previous =
+                current == selections_.end() ? blank : current->second;
+            for (const ModFeature& candidate : touched->features)
+                if (!(id == package_id && candidate.id == feature_id) &&
+                    is_feature_enabled(*touched, previous, candidate) &&
+                    !is_feature_enabled(*touched, selection, candidate))
+                    turned_off->emplace_back(id, candidate.id);
+        }
+        selections_[id] = std::move(selection);
+    }
     return true;
 }
 
@@ -2722,6 +2861,44 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
         for (const std::string& conflict : package->conflicts)
             if (active.find(conflict) != active.end())
                 result.errors.push_back(id + " conflicts with " + conflict);
+        /* Feature conflicts. The launcher turns the losing side off when a
+         * feature is ticked, so both enabled means a hand-edited state.toml:
+         * name both features rather than refuse the plan without a reason. */
+        const ModSelection blank;
+        const auto selection_for = [&](const std::string& key)
+            -> const ModSelection& {
+            const auto found = selections_.find(key);
+            return found == selections_.end() ? blank : found->second;
+        };
+        for (const ModFeature& feature : package->features) {
+            if (!is_feature_enabled(*package, selection_for(id), feature))
+                continue;
+            for (auto other = active.find(id); other != active.end(); ++other) {
+                for (const ModFeature& other_feature : other->second->features) {
+                    if (other->first == id && other_feature.id <= feature.id)
+                        continue;
+                    if (!is_feature_enabled(*other->second,
+                                            selection_for(other->first),
+                                            other_feature) ||
+                        !features_conflict(*package, feature, *other->second,
+                                           other_feature))
+                        continue;
+                    ModResolution::Diagnostic diagnostic;
+                    diagnostic.resource = "feature-conflict";
+                    diagnostic.package_id = id;
+                    diagnostic.feature_id = feature.id;
+                    diagnostic.other_package_id = other->first;
+                    diagnostic.other_feature_id = other_feature.id;
+                    diagnostic.message =
+                        id + "/" + feature.id + " (" + feature.name +
+                        ") conflicts with " + other->first + "/" +
+                        other_feature.id + " (" + other_feature.name +
+                        "); turn one of them off";
+                    result.diagnostics.push_back(diagnostic);
+                    result.errors.push_back(diagnostic.message);
+                }
+            }
+        }
 
         const auto selection = selections_.find(id);
         const ModSelection blank_selection;
@@ -3071,6 +3248,35 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
             resolved.feature_id = overlay->feature_id;
             result.overlays.push_back(std::move(resolved));
         }
+        for (const ModDiscDelta& delta : package->disc_deltas) {
+            const ModFeature* feature =
+                find_feature(*package, delta.feature_id);
+            if (!feature ||
+                !is_feature_enabled(*package, selected, *feature) ||
+                !conditions_match(*package, selected,
+                                  delta.feature_id, delta.when))
+                continue;
+            /* The delta is defined against one exact stock image. Applying
+             * it to anything else would serve garbage sectors, so a
+             * different (or unidentified) disc refuses the whole plan. */
+            if (disc_sha256 != delta.source_sha256) {
+                result.errors.push_back(
+                    package->id + "/" + delta.feature_id +
+                    ": disc delta needs the stock disc " +
+                    delta.source_sha256 + ", but this disc is " +
+                    (disc_sha256.empty() ? std::string("unidentified")
+                                         : disc_sha256));
+                continue;
+            }
+            ModResolution::DiscDelta resolved;
+            resolved.format = delta.format;
+            resolved.file = delta.file;
+            resolved.source_sha256 = delta.source_sha256;
+            resolved.target_sha256 = delta.target_sha256;
+            resolved.package_id = package->id;
+            resolved.feature_id = delta.feature_id;
+            result.disc_deltas.push_back(std::move(resolved));
+        }
         std::vector<const ModPlugin*> plugins;
         plugins.reserve(package->plugins.size());
         for (const ModPlugin& plugin : package->plugins) {
@@ -3110,6 +3316,15 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
         }
         result.errors.push_back(
             "more than one derived-disc provider is active: " + providers);
+    }
+    if (result.disc_deltas.size() > 1) {
+        std::string providers;
+        for (const auto& delta : result.disc_deltas) {
+            if (!providers.empty()) providers += ", ";
+            providers += delta.package_id + "/" + delta.feature_id;
+        }
+        result.errors.push_back(
+            "more than one disc delta is active: " + providers);
     }
     std::vector<ModResolution::Plugin> coalesced_plugins;
     coalesced_plugins.reserve(result.plugins.size());
@@ -3285,13 +3500,14 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
         result.writes.clear();
         result.overlays.clear();
         result.derived_discs.clear();
+        result.disc_deltas.clear();
         result.plugins.clear();
         return result;
     }
     result.fingerprint = fingerprint_text(
         canonical_resolution(
             result.ordered, selections_, result.writes, result.overlays,
-            result.derived_discs, result.plugins,
+            result.derived_discs, result.disc_deltas, result.plugins,
             disc_sha256));
     result.ok = true;
     return result;

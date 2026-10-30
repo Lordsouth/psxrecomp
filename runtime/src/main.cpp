@@ -195,8 +195,10 @@ extern "C" void     dirty_ram_register_text_image(uint32_t phys_lo,
  * every install must arm it — not just repo checkouts that happen to carry a
  * loose EXE copy next to game.toml. Source order:
  *   1. The local EXE file from game.toml (dev checkouts; recompiler input).
- *   2. The boot EXE extracted from the mounted disc image (end-user installs
- *      — the disc is the same bytes the BIOS loads, i.e. the true reference).
+ *   2. The boot EXE extracted from the player's stock disc image (end-user
+ *      installs — the recompiler consumed that same EXE). When a mod replaces
+ *      the boot EXE the BIOS loads different bytes; dirty_ram_clear_image_
+ *      baseline compares them against this reference to find the stale pages.
  * Registration passes ownership of the malloc'd buffer to memory.c. */
 static void arm_text_image_guard(const std::string &exe_path,
                                  uint32_t load_address,
@@ -12301,6 +12303,7 @@ int main(int argc, char** argv) {
     g_mod_load_release_frames = -1;
     g_mod_disc_speed_divisor = -1;
     g_mod_disc_instant_rate = -1;
+    memcard_clear_mod_subdir();
     g_turbo_load_wall_multiplier = 0;
     g_turbo_load_release_frames = TURBO_LOADS_RELEASE_FRAMES;
     if (!turbo_loads_offered)
@@ -12664,10 +12667,14 @@ session_reboot:
                          ident.region.c_str(), ident.detected_serial.c_str());
     }
     /* Arm the text-image guard now that both possible sources are resolved:
-     * the local EXE file (dev checkouts) and the disc image (every install). */
+     * the local EXE file (dev checkouts) and the disc image (every install).
+     * The reference must be the EXE the code was COMPILED from, so read the
+     * stock disc, never the mounted mod cache: a disc mod that replaces the
+     * boot EXE would otherwise become its own reference, and every changed
+     * function would pass the byte check and run its stale native body. */
     if (game_config_path)
         arm_text_image_guard(text_guard_exe_path, text_guard_load_addr,
-                             disc_path_str);
+                             resolved_disc.string());
     /* Executable/overlay patches from enabled mods, applied once the guard is
      * armed so a patched image is never mistaken for a divergent one. */
     mod_runtime_enable_disc_patches();

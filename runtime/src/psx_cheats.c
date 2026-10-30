@@ -23,6 +23,7 @@
  * that says it does not know the code.
  */
 #include "psx_cheats.h"
+#include "fntrace.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -280,6 +281,12 @@ void psx_cheats_on_vblank(void)
 {
     if (!s_loaded) psx_cheats_load(NULL);
     if (!s_active) return;
+    /* Nothing pokes RAM until the game's entry point has run. While the BIOS
+     * is still loading the executable, a cheat address can be part of the
+     * image being loaded: Digimon World 1.5 stages its new code in what the
+     * stock game uses as BSS (MOVIE_COMPLETED, PARTNER_PARA) and copies it
+     * out at entry, so a poke there before entry corrupts that code. */
+    if (!fntrace_is_game_started()) return;
 
     int skip = 0;
     unsigned rep_count = 0, rep_step = 0, rep_vstep = 0;

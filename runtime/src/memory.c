@@ -352,28 +352,6 @@ static inline void dirty_ram_mark_kernel_write(uint32_t phys) {
 
 int dirty_ram_is_dirty(uint32_t phys);
 
-/* Establish the clean compiled-image baseline for the game-EXE text region.
- * Called ONCE when the game entry is first reached (fntrace game-start): by then
- * the BIOS has fully loaded the boot EXE into [0x10000, FLOOR) — which IS the
- * compiled image — but no gameplay overlay has run yet. The EXE load (CD DMA via
- * dirty_ram_mark_executable_range) marks the whole text dirty as a FALSE POSITIVE
- * (RAM == compiled image); clearing it here means dirty_ram_is_dirty() afterwards
- * is true ONLY for pages a later overlay actually overwrote. The dispatch can then
- * trust a clean text page to run its compiled function and divert only truly-
- * overlaid pages to the interpreter (Tomba 2 loads a loader overlay over
- * 0x8001Dxxx). The kernel window [0,0x10000) (BIOS install stubs) and the overlay
- * region [FLOOR, RAM) are left untouched. */
-extern uint32_t g_overlay_region_floor;
-void dirty_ram_clear_image_baseline(void) {
-    uint32_t floor = g_overlay_region_floor;
-    if (floor <= DIRTY_RAM_KERNEL_TRACK_BYTES) return;
-    if (floor > RAM_SIZE) floor = RAM_SIZE;
-    uint32_t first_page = DIRTY_RAM_KERNEL_TRACK_BYTES >> DIRTY_RAM_PAGE_SHIFT;
-    uint32_t last_page  = (floor - 1u) >> DIRTY_RAM_PAGE_SHIFT;
-    for (uint32_t page = first_page; page <= last_page; page++)
-        dirty_ram_bitmap[page >> 5] &= ~(1u << (page & 31u));
-}
-
 /* Text-image divergence guard.
  *
  * dirty_ram_is_dirty() is intentionally coarse: it says a page was touched by
@@ -424,6 +402,48 @@ void dirty_ram_register_text_image(uint32_t phys_lo, const uint8_t *bytes,
 }
 
 int dirty_ram_text_image_registered(void) { return text_ref_image != NULL; }
+
+/* Establish the clean compiled-image baseline for the game-EXE text region.
+ * Called ONCE when the game entry is first reached (fntrace game-start): by then
+ * the BIOS has fully loaded the boot EXE into [0x10000, FLOOR) and any loader
+ * stub the EXE runs before entry_pc has finished, but no gameplay overlay has
+ * run yet. The EXE load (CD DMA via dirty_ram_mark_executable_range) marks the
+ * whole text dirty. A page whose live bytes equal the compiled reference image
+ * is a FALSE POSITIVE and is cleared, so dirty_ram_is_dirty() afterwards is true
+ * only for pages a later overlay actually overwrites (Tomba 2 loads a loader
+ * overlay over 0x8001Dxxx). A page whose bytes DIFFER from the image the code
+ * was compiled from stays dirty: the loaded EXE is not the compiled one there (a
+ * modded boot EXE, its own pre-entry copy loops, mod main_exe patches), so its
+ * compiled bodies are stale and it runs from live RAM. With the compiled EXE
+ * loaded unmodified no page differs and this is a plain clear. The kernel window
+ * [0,0x10000) (BIOS install stubs) and the overlay region [FLOOR, RAM) are left
+ * untouched. */
+extern uint32_t g_overlay_region_floor;
+void dirty_ram_clear_image_baseline(void) {
+    uint32_t floor = g_overlay_region_floor;
+    if (floor <= DIRTY_RAM_KERNEL_TRACK_BYTES) return;
+    if (floor > RAM_SIZE) floor = RAM_SIZE;
+    uint32_t first_page = DIRTY_RAM_KERNEL_TRACK_BYTES >> DIRTY_RAM_PAGE_SHIFT;
+    uint32_t last_page  = (floor - 1u) >> DIRTY_RAM_PAGE_SHIFT;
+    uint32_t diverged = 0;
+    for (uint32_t page = first_page; page <= last_page; page++) {
+        uint32_t lo = page << DIRTY_RAM_PAGE_SHIFT;
+        uint32_t hi = lo + (1u << DIRTY_RAM_PAGE_SHIFT);
+        if (hi > floor) hi = floor;
+        if (text_ref_image &&
+            dirty_ram_range_diverges_from_image(ram, text_ref_image,
+                                                text_ref_lo, text_ref_hi,
+                                                lo, hi)) {
+            dirty_ram_mark_page(lo);
+            diverged++;
+            continue;
+        }
+        dirty_ram_bitmap[page >> 5] &= ~(1u << (page & 31u));
+    }
+    if (diverged)
+        printf("psxrecomp: loaded EXE differs from the compiled image in %u "
+               "text page(s); those pages run from live RAM\n", diverged);
+}
 
 static inline void text_guard_note_write(uint32_t phys, uint32_t val, int size) {
     if (!text_ref_image) return;
