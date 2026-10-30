@@ -652,7 +652,10 @@ if(BUILD_TESTING)
     # clip-edge instructions at margin 0 and at a forced margin. The test
     # #includes gpu.c and dirty_ram_interp.c; link-time dead-code removal
     # keeps the stub set small (dead_strip is Apple ld's --gc-sections).
-    if(NOT MSVC)
+    # Not on Windows at all: COFF linkers (MSVC link and lld-link under mingw)
+    # report undefined symbols in unreferenced code before stripping it, so the
+    # small stub set this relies on can never link there.
+    if(NOT WIN32)
         add_executable(ws_cull_edge_interp_test
             ../runtime/tests/test_ws_cull_edge_interp.c
             ../runtime/src/ws_aspect_cone_math.c)
@@ -679,7 +682,7 @@ if(BUILD_TESTING)
     # [[draw_distance.clamp]] in the dirty-RAM interpreter: draw_distance.c's
     # store and switch and real interpreted guard instructions. The test
     # #includes draw_distance.c and dirty_ram_interp.c (as above).
-    if(NOT MSVC)
+    if(NOT WIN32)
         add_executable(draw_distance_interp_test
             ../runtime/tests/test_draw_distance_interp.c
             ../runtime/src/ws_aspect_cone_math.c)

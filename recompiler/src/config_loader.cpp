@@ -111,8 +111,12 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
             for (const uint16_t v : site.values) h.u32(v);
         }
     }
-    h.words("mod_function_exit_funcs", c.mod_function_exit_funcs);
-    h.words("mod_function_replace_funcs", c.mod_function_replace_funcs);
+    // Fork additions: in the identity only when a title uses them, like the
+    // post-v1 kinds below, so titles without them keep their overlay caches.
+    if (!c.mod_function_exit_funcs.empty())
+        h.words("mod_function_exit_funcs", c.mod_function_exit_funcs);
+    if (!c.mod_function_replace_funcs.empty())
+        h.words("mod_function_replace_funcs", c.mod_function_replace_funcs);
     h.words("cull_bias", c.ws_cull_bias_sites);
     if (!c.ws_cull_bias_lower_sites.empty())
         h.words("cull_bias_lower", c.ws_cull_bias_lower_sites);
