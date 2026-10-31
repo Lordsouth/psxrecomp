@@ -738,6 +738,277 @@ static void test_disc_delta() {
     fs::remove_all(root, ec);
 }
 
+/* A disc write on delta-owned sectors is allowed only when its feature
+ * requires the delta's feature; it is guarded against, and applied to, the
+ * delta's bytes on every read path. Overlays there, and writes from features
+ * that do not require the delta, still collide. */
+static void test_disc_delta_writes() {
+    const fs::path root =
+        fs::temp_directory_path() / "psxrecomp-mod-runtime-delta-writes";
+    std::error_code ec;
+    fs::remove_all(root, ec);
+    constexpr size_t kRaw = 2352;
+    const auto form1 = [](std::vector<uint8_t>& image, size_t lba) {
+        uint8_t* sector = image.data() + lba * kRaw;
+        sector[0] = 0;
+        std::memset(sector + 1, 0xFF, 10);
+        sector[11] = 0;
+        sector[15] = 2;
+        std::memset(sector + 16, 0, 8);
+    };
+    const auto user = [](std::vector<uint8_t>& image, size_t lba) {
+        return image.data() + lba * kRaw + 24;
+    };
+    const auto record = [](uint8_t* at, uint32_t lba, uint32_t bytes,
+                           const std::string& name) {
+        const size_t length = (33 + name.size() + 1) & ~size_t(1);
+        at[0] = (uint8_t)length;
+        for (unsigned i = 0; i < 4; ++i) {
+            at[2 + i] = (uint8_t)(lba >> (8 * i));
+            at[10 + i] = (uint8_t)(bytes >> (8 * i));
+        }
+        at[32] = (uint8_t)name.size();
+        std::memcpy(at + 33, name.data(), name.size());
+        return length;
+    };
+    const auto hex = [](const uint8_t* bytes, size_t count) {
+        static const char digits[] = "0123456789abcdef";
+        std::string out;
+        for (size_t i = 0; i < count; ++i) {
+            out += digits[bytes[i] >> 4];
+            out += digits[bytes[i] & 15];
+        }
+        return out;
+    };
+
+    /* Stock: 19 Form1 sectors, an ISO volume (PVD 16, root 17) holding
+     * STOCK.BIN at 18. The delta rewrites 17 and 18 and appends 19-20 as
+     * MODTBL.BIN, past the stock end (as Digimon World 1.5 does). */
+    std::vector<uint8_t> stock(19 * kRaw);
+    for (size_t lba = 0; lba < 19; ++lba) {
+        form1(stock, lba);
+        for (size_t i = 0; i < 2048; ++i)
+            user(stock, lba)[i] = (uint8_t)(i * 5u + lba * 17u + 1u);
+    }
+    uint8_t* pvd = user(stock, 16);
+    std::memset(pvd, 0, 2048);
+    pvd[0] = 1;
+    std::memcpy(pvd + 1, "CD001", 5);
+    pvd[6] = 1;
+    record(pvd + 156, 17, 2048, std::string(1, '\0'));
+    pvd[156 + 25] = 2;
+    std::memset(user(stock, 17), 0, 2048);
+    record(user(stock, 17), 18, 2048, "STOCK.BIN;1");
+    std::vector<uint8_t> target(stock);
+    target.resize(21 * kRaw);
+    record(user(target, 17) + record(user(target, 17), 18, 2048, "STOCK.BIN;1"),
+           19, 4096, "MODTBL.BIN;1");
+    for (size_t lba = 18; lba < 21; ++lba) {
+        form1(target, lba);
+        for (size_t i = 0; i < 2048; ++i)
+            user(target, lba)[i] = (uint8_t)(i * 11u + lba * 29u + 3u);
+    }
+    std::vector<uint8_t> patch = {'B', 'P', 'S', '1'};
+    bps_number(patch, stock.size());
+    bps_number(patch, target.size());
+    bps_number(patch, 0);
+    for (size_t lba = 0; lba < 21; ++lba) {
+        const bool same = lba < 19 &&
+            std::memcmp(stock.data() + lba * kRaw, target.data() + lba * kRaw,
+                        kRaw) == 0;
+        bps_action(patch, same ? 0 : 1, kRaw);
+        if (!same)
+            patch.insert(patch.end(), target.begin() + lba * kRaw,
+                         target.begin() + (lba + 1) * kRaw);
+    }
+    bps_le32(patch, crc32_compute(stock.data(), stock.size()));
+    bps_le32(patch, crc32_compute(target.data(), target.size()));
+    bps_le32(patch, crc32_compute(patch.data(), patch.size()));
+
+    const fs::path stock_path = root / "stock.bin";
+    const std::vector<uint8_t> reskin(16, 0x5a);
+    const auto manifest = [&](const std::string& modtbl_replace) {
+        const auto patch_entry = [](const std::string& feature,
+                                    const char* kind, uint64_t offset,
+                                    const std::string& expected,
+                                    const std::string& replace) {
+            return "[[patch]]\nfeature = \"" + feature + "\"\ntarget = \"" +
+                   kind + "\"\noffset = " + std::to_string(offset) +
+                   "\nexpected = \"" + expected + "\"\nreplace = \"" +
+                   replace + "\"\n";
+        };
+        const auto requires_entry = [](const std::string& feature,
+                                       const std::string& required) {
+            return "[[constraint]]\nfeature = \"" + feature +
+                   "\"\nkind = \"requires_feature\"\nrequires_feature = \"" +
+                   required + "\"\n";
+        };
+        std::string text =
+            "format_version = 12\nid = \"delta.writes\"\nversion = \"1.0.0\"\n"
+            "name = \"Delta Writes\"\n[[target]]\ngame_id = \"SLUS-DELTA\"\n"
+            "disc_sha256 = \"" + sha256_hex(stock) + "\"\n";
+        for (const char* id :
+             {"remaster", "bridge", "unbound", "loose", "reskin", "stale"})
+            text += std::string("[[feature]]\nid = \"") + id +
+                    "\"\nname = \"" + id + "\"\n";
+        /* unbound -> bridge -> remaster: the requirement chain is followed. */
+        text += requires_entry("bridge", "remaster") +
+                requires_entry("unbound", "bridge") +
+                requires_entry("reskin", "remaster") +
+                requires_entry("stale", "remaster");
+        /* Guards are the delta's bytes, never the stock disc's. */
+        text += patch_entry("unbound", "disc_user", 18 * 2048 + 4,
+                            hex(user(target, 18) + 4, 2), "a1b2");
+        text += patch_entry("unbound", "disc_raw", 18 * kRaw + 124,
+                            hex(target.data() + 18 * kRaw + 124, 1), "c3");
+        text += patch_entry("unbound", "disc_user", 19 * 2048 + 0x20,
+                            hex(user(target, 19) + 0x20, 2), modtbl_replace);
+        text += patch_entry("loose", "disc_user", 19 * 2048 + 0x40,
+                            hex(user(target, 19) + 0x40, 1), "ee");
+        /* A required write guarded with the stock (pre-delta) bytes. */
+        text += patch_entry("stale", "disc_raw", 18 * kRaw + 200,
+                            hex(stock.data() + 18 * kRaw + 200, 1), "dd");
+        text += "[[overlay]]\nfeature = \"reskin\"\ntarget = \"disc_user\"\n"
+                "offset = " + std::to_string(19 * 2048) +
+                "\nfile = \"assets/reskin.bin\"\nsha256 = \"" +
+                sha256_hex(reskin) + "\"\n";
+        text += "[[disc_delta]]\nfeature = \"remaster\"\nformat = \"bps\"\n"
+                "file = \"assets/remaster.bps\"\nsource_sha256 = \"" +
+                sha256_hex(stock) + "\"\ntarget_sha256 = \"" +
+                sha256_hex(target) + "\"\n";
+        return text;
+    };
+    const auto select = [&](std::initializer_list<const char*> enabled) {
+        std::string text = "format_version = 2\n[[package]]\n"
+                           "id = \"delta.writes\"\nversion = \"1.0.0\"\n";
+        for (const char* id : enabled)
+            text += std::string("[[feature]]\npackage_id = \"delta.writes\"\n"
+                                "id = \"") + id + "\"\nenabled = true\n";
+        write_text(root / "state.toml", text);
+    };
+    const auto commit = [&](std::string& error) {
+        error.clear();
+        if (!PSXRecompV4::mod_runtime_initialize(
+                root, "SLUS-DELTA", 0x80002000, {}, &error))
+            return false;
+        if (!PSXRecompV4::mod_runtime_commit(stock_path, &error))
+            return false;
+        mod_runtime_enable_disc_patches();
+        return true;
+    };
+    const auto host_file = [](const char* path, std::vector<uint8_t>& out) {
+        uint32_t bytes = 0;
+        out.assign(8192, 0);
+        if (!psx_mod_read_disc_file(path, out.data(), (uint32_t)out.size(),
+                                    &bytes))
+            return false;
+        out.resize(bytes);
+        return true;
+    };
+    const auto cache_bytes = [&]() {
+        std::vector<std::vector<uint8_t>> files;
+        for (const fs::directory_entry& entry :
+             fs::directory_iterator(root / "cache", ec))
+            files.push_back(read_bytes(entry.path()));
+        return files;
+    };
+
+    write_bytes(stock_path, stock);
+    const fs::path package = root / "installed/delta.writes/1.0.0";
+    write_bytes(package / "assets/remaster.bps", patch);
+    write_bytes(package / "assets/reskin.bin", reskin);
+    write_text(package / "manifest.toml", manifest("0102"));
+    std::string error;
+
+    select({"remaster"});
+    check(commit(error), error.c_str());
+    const std::string delta_fingerprint =
+        PSXRecompV4::mod_runtime_fingerprint();
+    const auto delta_cache = cache_bytes();
+    check(delta_cache.size() == 1, "the delta alone builds one cache file");
+
+    /* Allowed: the writes land on the post-delta bytes, in range and past
+     * the stock end, on the drive's raw and cooked reads and host reads. */
+    select({"remaster", "bridge", "unbound"});
+    check(commit(error), error.c_str());
+    std::vector<uint8_t> effective(target);
+    effective[18 * kRaw + 24 + 4] = 0xa1;
+    effective[18 * kRaw + 24 + 5] = 0xb2;
+    effective[18 * kRaw + 124] = 0xc3;
+    effective[19 * kRaw + 24 + 0x20] = 0x01;
+    effective[19 * kRaw + 24 + 0x21] = 0x02;
+    check(disc_serves(stock_path, effective),
+          "required writes must apply after the delta on raw drive reads");
+    {
+        void* handle = iso_open(stock_path.string().c_str());
+        std::array<uint8_t, 2048> cooked{};
+        check(handle && iso_read_sector(handle, 19, cooked.data(), 2048) &&
+                  std::memcmp(cooked.data(), effective.data() + 19 * kRaw + 24,
+                              2048) == 0,
+              "a required write past the stock end must reach cooked reads");
+        check(handle && iso_read_sector(handle, 18, cooked.data(), 2048) &&
+                  std::memcmp(cooked.data(), effective.data() + 18 * kRaw + 24,
+                              2048) == 0,
+              "cooked reads of an in-range delta sector must serve the delta "
+              "and its required writes");
+        iso_close(handle);
+    }
+    std::vector<uint8_t> file;
+    check(host_file("MODTBL.BIN", file) && file.size() == 4096 &&
+              std::memcmp(file.data(), effective.data() + 19 * kRaw + 24,
+                          2048) == 0 &&
+              std::memcmp(file.data() + 2048,
+                          effective.data() + 20 * kRaw + 24, 2048) == 0,
+          "host reads must serve a past-end delta file with its writes");
+    check(host_file("STOCK.BIN", file) && file.size() == 2048 &&
+              std::memcmp(file.data(), effective.data() + 18 * kRaw + 24,
+                          2048) == 0,
+          "host reads must serve a delta sector with raw and user writes");
+    const std::string writes_fingerprint =
+        PSXRecompV4::mod_runtime_fingerprint();
+    check(writes_fingerprint != delta_fingerprint,
+          "required writes must change the plan fingerprint");
+    check(cache_bytes() == delta_cache,
+          "writes must never be baked into the delta cache");
+
+    write_text(package / "manifest.toml", manifest("0103"));
+    check(commit(error), error.c_str());
+    check(PSXRecompV4::mod_runtime_fingerprint() != writes_fingerprint,
+          "changing a required write must change the plan fingerprint");
+    check(cache_bytes() == delta_cache,
+          "a changed write must leave the delta cache untouched");
+    effective[19 * kRaw + 24 + 0x21] = 0x03;
+    check(disc_serves(stock_path, effective),
+          "a changed required write must be served");
+    write_text(package / "manifest.toml", manifest("0102"));
+
+    /* Refused: a write whose feature does not require the delta. */
+    select({"remaster", "loose"});
+    check(!commit(error) &&
+              error.find("delta.writes/loose collides at disc LBA 19 with "
+                         "disc delta delta.writes/remaster") !=
+                  std::string::npos,
+          "a write without the requirement must collide with the delta");
+
+    /* Refused: overlays stay refused even when they require the delta. */
+    select({"remaster", "reskin"});
+    check(!commit(error) &&
+              error.find("delta.writes/reskin collides at disc LBA 19 with "
+                         "disc delta") != std::string::npos,
+          "an overlay on a delta sector must collide even when required");
+
+    /* Refused: the stock byte no longer guards a delta sector. The guard is
+     * checked against the delta before launch, not when the sector is read. */
+    select({"remaster", "stale"});
+    check(!commit(error) &&
+              error.find("delta.writes/stale expected bytes at disc LBA 18 "
+                         "do not match disc delta delta.writes/remaster") !=
+                  std::string::npos,
+          "a wrong guard on a delta sector must refuse the launch");
+
+    fs::remove_all(root, ec);
+}
+
 /* End-to-end: run the real runtime path (manifest -> resolution -> BPS apply
  * -> cache -> ISO wrapper reads) over a full disc image and hash every sector
  * the CD controller would see. Driven by tools/check_disc_delta_e2e.py. */
@@ -2988,6 +3259,7 @@ id = "override.test"
 
     fs::remove_all(root, ec);
     test_disc_delta();
+    test_disc_delta_writes();
     if (failures) return 1;
     std::cout << "mod runtime tests passed\n";
     return 0;

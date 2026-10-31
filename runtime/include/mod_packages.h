@@ -413,6 +413,10 @@ struct ModResolution {
         std::vector<Field> fields;
         std::string package_id;
         std::string feature_id;
+        /* Set at commit for a disc write on disc-delta sectors (allowed only
+         * when its feature requires the delta's): guarded against, and
+         * applied to, the bytes after the delta. Not part of the fingerprint. */
+        bool after_disc_delta = false;
     };
     std::vector<Write> writes;
     struct Overlay {

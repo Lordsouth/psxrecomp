@@ -722,6 +722,13 @@ before its entry point. Changed executable ranges use the existing dirty-RAM
 interpreter/native-overlay machinery; untouched functions remain on the static
 native path.
 
+After a savestate load and after a rewind (`mod_runtime_on_savestate_loaded`),
+every `main_exe` write is re-applied without its guard. Keep `main_exe` writes
+out of RAM that overlays or the game reuse: a state saved while an overlay
+occupies that RAM would get the replacement bytes written into the overlay. A
+table that lives there and is loaded from disc is patched on disc instead
+(`disc_user`), which savestates leave alone.
+
 Small `disc_raw` and `disc_user` patches are equal-length guarded writes and may
 not cross a sector boundary:
 
@@ -805,10 +812,29 @@ player's disc hashes to `source_sha256`. Before boot the runtime then:
    that does not verify is rebuilt.
 
 The first application holds the stock and patched images in memory together
-(about 800 MB for a full CD); cache hits need only the derived sectors. Any
-other enabled disc write or overlay touching a delta-owned sector fails with a
-collision before launch. The delta identity (`format`, both hashes, owner)
-participates in the plan fingerprint.
+(about 800 MB for a full CD); cache hits need only the derived sectors. The
+delta identity (`format`, both hashes, owner) participates in the plan
+fingerprint.
+
+A delta-owned sector is one the delta changes or appends. A `disc_user` or
+`disc_raw` `[[patch]]` may write inside one only when its feature is the
+delta's own feature or requires it through `requires_feature` constraints in
+the same package (chains count: A requires B requires the delta's feature).
+The delta is then always present beneath the write, so:
+
+- its `expected` bytes are the patched disc's bytes, not the stock disc's;
+- it is guarded and applied after the delta's bytes on every read: raw and
+  2048-byte drive reads, host reads (`psx_mod_read_disc_file`), and sectors
+  past the stock end;
+- its guard on the delta's sectors is checked against the delta before
+  launch, and a mismatch refuses the launch with `<package>/<feature> expected
+  bytes at disc LBA <n> do not match disc delta <package>/<feature>`;
+- it is never baked into the delta cache, and it is part of the plan
+  fingerprint like any other write.
+
+Every other write there, and every `[[overlay]]` there (required or not),
+fails before launch with `<package>/<feature> collides at disc LBA <n> with
+disc delta <package>/<feature>`.
 
 ## Feature conflicts
 

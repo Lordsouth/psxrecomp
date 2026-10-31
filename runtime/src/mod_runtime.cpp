@@ -56,6 +56,7 @@ extern "C" const char* host_launch_timing_stage_name(uint32_t stage) {
 #include <fstream>
 #include <iomanip>
 #include <map>
+#include <set>
 #include <sstream>
 #include <string>
 #include <system_error>
@@ -1407,15 +1408,69 @@ bool materialize_disc_delta(RuntimeMods& s, ModResolution& plan,
             " with disc delta " + owner;
         return false;
     };
-    for (const ModResolution::Write& write : plan.writes) {
+    /* A write may sit on delta-owned sectors only when the delta is always
+     * beneath it: its feature is the delta's own, or requires it through
+     * in-package requires_feature constraints (followed through chains). */
+    const ModPackage* delta_package = nullptr;
+    for (const ModPackage* package : plan.ordered)
+        if (package && package->id == delta.package_id) delta_package = package;
+    const auto requires_delta = [&](const ModResolution::Write& write) {
+        if (!delta_package || write.package_id != delta.package_id)
+            return false;
+        std::set<std::string> seen;
+        std::vector<std::string> pending{write.feature_id};
+        while (!pending.empty()) {
+            const std::string feature = pending.back();
+            pending.pop_back();
+            if (feature == delta.feature_id) return true;
+            if (!seen.insert(feature).second) continue;
+            for (const ModConstraint& constraint : delta_package->constraints)
+                if (constraint.kind == ModConstraintKind::RequiresFeature &&
+                    constraint.feature_id == feature)
+                    pending.push_back(constraint.required_feature_id);
+        }
+        return false;
+    };
+    /* Such a write's guard is the delta's bytes, already in hand: check it
+     * now so a wrong one refuses the launch instead of disabling the disc
+     * plan mid-game. Bytes on sectors the delta leaves alone are checked
+     * when read; disc_user bytes need a Mode2 Form1 delta sector. */
+    const auto delta_guard_holds = [&](const ModResolution::Write& write) {
+        const bool raw = write.target == ModPatchTarget::DiscRaw;
+        const uint64_t size = raw ? kRawSectorBytes : 2048;
+        for (size_t i = 0; i < write.expected.size(); ++i) {
+            const uint64_t at = write.location + i;
+            const auto found = std::lower_bound(
+                sectors.lbas.begin(), sectors.lbas.end(), at / size);
+            if (found == sectors.lbas.end() || *found != at / size) continue;
+            const uint8_t* sector = sectors.bytes.data() +
+                (size_t)(found - sectors.lbas.begin()) * kRawSectorBytes;
+            size_t offset = (size_t)(at % size);
+            if (!raw) {
+                if (sector[15] != 2 || (sector[18] & 0x20u)) return false;
+                offset += 24;
+            }
+            if (sector[offset] != write.expected[i]) return false;
+        }
+        return true;
+    };
+    for (ModResolution::Write& write : plan.writes) {
         if (write.target == ModPatchTarget::MainExe) continue;
         const uint64_t size =
             write.target == ModPatchTarget::DiscRaw ? kRawSectorBytes : 2048;
         const uint64_t first = write.location / size;
         const uint64_t last =
             (write.location + write.expected.size() - 1) / size;
-        if (owned(first, last))
+        if (!owned(first, last)) continue;
+        if (!requires_delta(write))
             return collision(first, write.package_id, write.feature_id);
+        if (!delta_guard_holds(write)) {
+            if (error) *error = write.package_id + "/" + write.feature_id +
+                " expected bytes at disc LBA " + std::to_string(first) +
+                " do not match disc delta " + owner;
+            return false;
+        }
+        write.after_disc_delta = true;
     }
     for (const ModResolution::Overlay& overlay : plan.overlays) {
         const uint64_t size =
@@ -3546,9 +3601,20 @@ static constexpr uint32_t kMaxDiscFileBytes = 360000u * 2048u;
 static bool read_effective_user_sector(PS1::ISOReader& reader, uint32_t lba,
                                        uint8_t* sector) {
     uint8_t raw[2352];
-    if (reader.ReadRawSector(lba, raw)) {
-        if (raw[15] != 1 && (raw[15] != 2 || (raw[18] & 0x20u))) return false;
+    bool have_raw = reader.ReadRawSector(lba, raw), patched = false;
+    if (!have_raw && lba >= reader.GetSectorCount() &&
+        lba < PSXRecompV4::state().disc_sector_extent) {
+        /* Past the stock end, inside the sectors the plan's overlays append
+         * (a growing disc delta): the sector is only what the plan provides,
+         * as iso_read_raw_sector serves it to the drive. */
+        std::memset(raw, 0, sizeof raw);
         patch_committed_disc_sector(lba, 1, raw, sizeof raw);
+        have_raw = patched = true;
+    }
+    if (have_raw) {
+        /* The header is tested after the raw claims, which may change it. */
+        if (!patched) patch_committed_disc_sector(lba, 1, raw, sizeof raw);
+        if (raw[15] != 1 && (raw[15] != 2 || (raw[18] & 0x20u))) return false;
         std::memcpy(sector, raw + (raw[15] == 1 ? 16 : 24), 2048);
         if (raw[15] == 1) patch_committed_disc_sector(lba, 0, sector, 2048);
     } else {
@@ -4476,9 +4542,10 @@ extern "C" int psx_mod_register_function_replace_plugin(
 }
 
 /* First callback to claim wins; the generated body then returns immediately.
- * Registration is not the same as being active -- like the entry hooks, these
- * fire whether or not the owning feature was selected, so a callback must
- * decide for itself and return 0 when its feature is off. */
+ * Registration is not the same as being active -- unlike the entry hooks
+ * (built only for plugins the plan selects), these fire whether or not the
+ * owning feature was selected, so a callback must decide for itself and
+ * return 0 when its feature is off. */
 extern "C" int psx_mod_function_replace(CPUState* cpu, uint32_t address) {
     using namespace PSXRecompV4;
     if (!cpu) return 0;
@@ -4696,10 +4763,13 @@ static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
     /* Raw Mode2 Form1 reads are also the source of the 2048-byte logical
      * stream consumed by the emulated CD controller. Apply raw claims to the
      * complete sector, then user-data claims to its payload window. Form2/XA
-     * and CDDA sectors deliberately do not receive disc_user overlays. */
-    const bool has_mode2_form1_user_data =
-        raw_sector && size >= 2072 && bytes[15] == 2 &&
-        (bytes[18] & 0x20u) == 0;
+     * and CDDA sectors deliberately do not receive disc_user overlays. The
+     * header is read after the raw claims: a sector past the stock end starts
+     * zeroed and only a raw overlay (a growing disc delta) makes it Form1. */
+    const auto has_mode2_form1_user_data = [&] {
+        return raw_sector && size >= 2072 && bytes[15] == 2 &&
+               (bytes[18] & 0x20u) == 0;
+    };
     const ModPatchTarget target =
         raw_sector ? ModPatchTarget::DiscRaw : ModPatchTarget::DiscUser;
     const uint64_t base = (uint64_t)lba * size;
@@ -4710,15 +4780,22 @@ static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
         raw_sector ? s.raw_overlay_index : s.user_overlay_index;
     const auto overlay_sector = overlay_index.find(lba);
     if (sector == index.end() && overlay_sector == overlay_index.end()) {
-        if (has_mode2_form1_user_data)
+        if (has_mode2_form1_user_data())
             patch_committed_disc_sector(lba, 0, bytes + 24, 2048);
         return;
     }
-    if (sector != index.end()) {
+    /* Writes on disc-delta sectors (after_disc_delta) guard and patch the
+     * delta's bytes, so they run after the overlays; all others run before. */
+    const auto apply_writes = [&](bool after_disc_delta) {
+        if (sector == index.end()) return true;
+        const auto mine = [&](const ModResolution::Write& write) {
+            return write.after_disc_delta == after_disc_delta &&
+                   write.target == target && write.location >= base &&
+                   write.location + write.expected.size() <= end;
+        };
         for (size_t write_index : sector->second) {
             const ModResolution::Write& write = s.plan.writes[write_index];
-            if (write.target != target || write.location < base ||
-                write.location + write.expected.size() > end) continue;
+            if (!mine(write)) continue;
             const size_t offset = (size_t)(write.location - base);
             if (std::memcmp(bytes + offset, write.expected.data(),
                             write.expected.size()) != 0) {
@@ -4727,13 +4804,12 @@ static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
                     "(expected-byte guard failed; disc overlay disabled)\n",
                     s.plan.fingerprint.c_str(), lba, offset);
                 s.disc_guard_failed = true;
-                return;
+                return false;
             }
         }
         for (size_t write_index : sector->second) {
             const ModResolution::Write& write = s.plan.writes[write_index];
-            if (write.target != target || write.location < base ||
-                write.location + write.expected.size() > end) continue;
+            if (!mine(write)) continue;
             const size_t offset = (size_t)(write.location - base);
             if (write.fields.empty()) {
                 std::memcpy(bytes + offset, write.replacement.data(),
@@ -4748,7 +4824,9 @@ static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
                         field.replacement.size());
             }
         }
-    }
+        return true;
+    };
+    if (!apply_writes(false)) return;
     if (overlay_sector != overlay_index.end()) {
         for (size_t overlay_index_value : overlay_sector->second) {
             const ModResolution::Overlay& overlay =
@@ -4765,13 +4843,43 @@ static void patch_committed_disc_sector(uint32_t lba, int raw_sector,
                         overlay.payload.data() + source, count);
         }
     }
-    if (has_mode2_form1_user_data && !s.disc_guard_failed)
+    if (!apply_writes(true)) return;
+    if (has_mode2_form1_user_data())
         patch_committed_disc_sector(lba, 0, bytes + 24, 2048);
+}
+
+/* True when a raw overlay replaces the whole raw sector (a disc delta's). */
+static bool raw_sector_replaced(uint32_t lba) {
+    using namespace PSXRecompV4;
+    const RuntimeMods& s = state();
+    const auto found = s.raw_overlay_index.find(lba);
+    if (found == s.raw_overlay_index.end()) return false;
+    const uint64_t base = (uint64_t)lba * kRawSectorBytes;
+    for (size_t i : found->second) {
+        const ModResolution::Overlay& overlay = s.plan.overlays[i];
+        if (overlay.location <= base &&
+            overlay.location + overlay.payload.size() >= base + kRawSectorBytes)
+            return true;
+    }
+    return false;
 }
 
 extern "C" void mod_runtime_patch_disc_sector(uint32_t lba, int raw_sector,
                                                uint8_t* bytes, uint32_t size) {
     if (!PSXRecompV4::state().disc_enabled) return;
+    if (!raw_sector && bytes && size >= 2048 && raw_sector_replaced(lba)) {
+        /* A 2048-byte read (iso_read_sector, after a failed raw read) of a
+         * sector a raw overlay replaces whole: the stock payload is stale, so
+         * serve the user window of the raw sector the plan builds -- delta,
+         * post-delta writes, Form1 user claims -- as the raw path does. */
+        uint8_t raw[2352] = {};
+        patch_committed_disc_sector(lba, 1, raw, sizeof raw);
+        if (PSXRecompV4::state().disc_guard_failed) return;
+        if (raw[15] == 2 && (raw[18] & 0x20u) == 0) {
+            std::memcpy(bytes, raw + 24, 2048);
+            return;
+        }
+    }
     patch_committed_disc_sector(lba, raw_sector, bytes, size);
 }
 
