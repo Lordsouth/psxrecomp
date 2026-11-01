@@ -5,7 +5,7 @@
 #include <string.h>
 #include <math.h>
 
-typedef struct { uint16_t* pixels; uint32_t width, height; } Bank;
+typedef struct { uint16_t* pixels; uint32_t width, height; int live_clut; } Bank;
 typedef struct { uint32_t begin, size; } PacketArena;
 static Bank banks[65536];
 static PacketArena arenas[16];
@@ -25,22 +25,33 @@ void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver) {
     resolve_bank = resolver;
 }
 
-int psx_mod_define_texture_bank(uint16_t id, uint32_t w, uint32_t h,
-                                const uint16_t* pixels) {
+static int define_bank(uint16_t id, uint32_t w, uint32_t h,
+                       const uint16_t* pixels, int live_clut) {
     uint32_t bytes;
     Bank* bank = &banks[id];
     if (!id || !pixels || !w || !h || w > 1024u || h > 512u) return 0;
     bytes = w * h * 2u;
     if (bank->pixels)
         return bank->width == w && bank->height == h &&
+               bank->live_clut == live_clut &&
                memcmp(bank->pixels, pixels, bytes) == 0;
     if (bytes > 256u * 1024u * 1024u - bank_bytes) return 0;
     bank->pixels = (uint16_t*)malloc(bytes);
     if (!bank->pixels) return 0;
     memcpy(bank->pixels, pixels, bytes);
-    bank->width = w; bank->height = h;
+    bank->width = w; bank->height = h; bank->live_clut = live_clut;
     bank_bytes += bytes;
     return 1;
+}
+
+int psx_mod_define_texture_bank(uint16_t id, uint32_t w, uint32_t h,
+                                const uint16_t* pixels) {
+    return define_bank(id, w, h, pixels, 0);
+}
+
+int psx_mod_define_texture_bank_live_clut(uint16_t id, uint32_t w, uint32_t h,
+                                          const uint16_t* pixels) {
+    return define_bank(id, w, h, pixels, 1);
 }
 
 const uint16_t* mod_texture_bank_pixels(uint16_t id, uint32_t* w, uint32_t* h) {
@@ -52,6 +63,11 @@ const uint16_t* mod_texture_bank_pixels(uint16_t id, uint32_t* w, uint32_t* h) {
     }
     *w = banks[id].width; *h = banks[id].height;
     return banks[id].pixels;
+}
+
+int mod_texture_bank_live_clut(uint16_t id) {
+    uint32_t w, h;
+    return mod_texture_bank_pixels(id, &w, &h) && banks[id].live_clut;
 }
 
 int psx_mod_host_output_scope(void);

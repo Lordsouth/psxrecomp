@@ -14,6 +14,8 @@ uint32_t psx_mod_read_word(uint32_t address) {
     uint32_t offset=(address&0x1fffffffu)-PSX_MOD_GPU_DMA_APERTURE_BASE;
     if(offset>sizeof memory-4)abort(); ++reads;return memory[offset/4];
 }
+/* mod_texture_banks.c refuses inside a netplay host-output hook; none here. */
+int psx_mod_host_output_scope(void){return 0;}
 static void check(int ok,const char* text){if(!ok){fprintf(stderr,"FAIL %s\n",text);exit(1);}}
 static int resolve(uint16_t id){uint16_t data=0x4567;++resolves;return psx_mod_define_texture_bank(id,1,1,&data);}
 static uint32_t bits(float f){uint32_t n;memcpy(&n,&f,4);return n;}
@@ -37,6 +39,13 @@ int main(void){
     psx_mod_set_texture_bank_resolver(resolve);
     check(mod_texture_bank_pixels(2,&w,&h)[0]==0x4567 && resolves==1,"lazy restored-bank resolver");
     check(mod_texture_bank_pixels(2,&w,&h)!=NULL && resolves==1,"resident bank no reload");
+    check(!mod_texture_bank_live_clut(1),"retained-palette bank by default");
+    check(!psx_mod_define_texture_bank_live_clut(1,2,2,(uint16_t[4]){1,2,3,4}),"live palette is part of identity");
+    check(psx_mod_define_texture_bank_live_clut(3,2,2,data),"define live-palette bank");
+    check(mod_texture_bank_live_clut(3),"live-palette flag kept");
+    check(psx_mod_define_texture_bank_live_clut(3,2,2,data),"identical live definition idempotent");
+    check(!psx_mod_define_texture_bank(3,2,2,data),"live bank cannot become retained");
+    check(!mod_texture_bank_live_clut(4) && resolves==2,"missing bank resolved before flag read");
     const uint32_t arena=psx_mod_alloc_texture_packet_memory(80,16);
     uint32_t words[9]={0x34000000,0,0,0x23000000,0,0,0x01000000,0,0};
     check(!mod_texture_packet_bank(0x80001004,words,9),"stock packet cannot opt in");

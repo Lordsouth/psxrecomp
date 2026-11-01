@@ -7,14 +7,19 @@ outside guest RAM/VRAM. The first consumer is Crash's N. Sanity Beach experiment
 - `psx_mod_read_disc_file`: emulation-thread-only, reads the original or derived
   mounted ISO/CUE/BIN/CHD through an independent reader. Query with NULL/0, then
   supply capacity for the whole file (64 MiB ceiling). Applies active raw/user
-  sector patches; never seeks the emulated CD controller. Current ISO path
-  lookup supports root files and one subdirectory.
+  sector patches; never seeks the emulated CD controller. ISO path lookup
+  walks every component, so nested paths (`\MAP\MAP5\FILE.TFS`) work.
 - Immutable texture banks: stable nonzero 16-bit IDs, owned copies of PS1
   texels/indices and palettes, lazy OpenGL upload. ID 0 means ordinary VRAM.
   256 MiB aggregate host budget, maximum 1024x512 words per bank. A resolver can
   rebuild a missing bank after a cold save-state restore. IDs must not be reused
   for different assets during a process lifetime. Software/Vulkan and the GL
   CPU-authoritative dual path report unsupported.
+- Live-palette banks (`psx_mod_define_texture_bank_live_clut`): indexed texels
+  only; GT3 packets naming one take their CLUT from live VRAM, as the 16x16
+  BG2D bank path always did, so palette uploads (fades, time of day) apply.
+  The flag is part of the bank's identity. Digimon World's field backdrop
+  (`dw_ws_sliver.c` in that port) is the consumer.
 - Trusted GT3 packet arenas: bank ID in unused C1/C2 colour high bytes; optional
   fractional XY/reciprocal-depth suffix. Only explicitly allocated packet
   arenas interpret this extension; stock packets retain their meaning. See

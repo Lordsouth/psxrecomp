@@ -5998,7 +5998,10 @@ static void gp0_exec_shaded_textured_tri(void) {
 
     uint16_t host_bank = mod_texture_packet_bank(gp0_cmd_source_addr, gp0_cmd_buf, 9u);
     if (host_bank && (gr_backend() != GR_BACKEND_OPENGL ||
-                      !gl_renderer_select_texture_bank(host_bank))) return;
+                      !gl_renderer_texture_banks_supported() ||
+                      !(mod_texture_bank_live_clut(host_bank)
+                            ? gl_renderer_select_texture_bank_live_clut(host_bank)
+                            : gl_renderer_select_texture_bank(host_bank)))) return;
 
     gr_set_semi_transparency(semi_trans, (int)semi_transparency);
     prepare_precise_triangle(1, 4, 7,

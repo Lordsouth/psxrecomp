@@ -266,6 +266,12 @@ typedef int (*PSXModTextureBankResolver)(uint16_t id);
 int psx_mod_texture_banks_supported(void);
 int psx_mod_define_texture_bank(uint16_t id, uint32_t width, uint32_t height,
                                 const uint16_t* pixels);
+/* The same for indexed texels that keep the game's palette: GT3 packets naming
+ * such a bank read their CLUT from live VRAM, so palette uploads (time of day,
+ * fades) apply exactly as they do to the game's own textures. The flag is part
+ * of the bank's identity: redefining the id without it fails. */
+int psx_mod_define_texture_bank_live_clut(uint16_t id, uint32_t width,
+                                          uint32_t height, const uint16_t* pixels);
 void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
 /* Default-off GL optimization: batch immutable-bank semi triangles in painter
  * order on the single-pass dual-source path only. Ordinary VRAM, subtractive
