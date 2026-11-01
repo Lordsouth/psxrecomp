@@ -6029,6 +6029,10 @@ int psx_mod_texture_banks_supported(void) {
     return gr_texture_banks_supported();
 }
 
+int psx_mod_renderer_accelerated(void) {
+    return gr_backend() != GR_BACKEND_SOFTWARE;
+}
+
 /* Execute shaded textured quad (GP0 0x3C-0x3F) */
 static void gp0_exec_shaded_textured_quad(void) {
     if (native_wide_projective_draw()) return;

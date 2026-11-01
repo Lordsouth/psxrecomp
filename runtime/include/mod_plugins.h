@@ -264,6 +264,11 @@ int psx_mod_disc_file_extent(const char* path, uint32_t* lba, uint32_t* size);
  * including when a restored DMA queue refers to a previously unseen level. */
 typedef int (*PSXModTextureBankResolver)(uint16_t id);
 int psx_mod_texture_banks_supported(void);
+/* 1 when the active renderer rasterises on the host GPU (OpenGL, Vulkan), 0 on
+ * the Software renderer, where every extra primitive -- a bank backdrop drawn
+ * over the VRAM one it covers, say -- is CPU raster time at the internal
+ * resolution. Ask when deciding: netplay can switch the backend mid-session. */
+int psx_mod_renderer_accelerated(void);
 int psx_mod_define_texture_bank(uint16_t id, uint32_t width, uint32_t height,
                                 const uint16_t* pixels);
 /* The same for indexed texels that keep the game's palette: GT3 packets naming
