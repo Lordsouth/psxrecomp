@@ -18234,6 +18234,16 @@ int main(int argc, char** argv) {
                     (int)addresses.size());
             }
             {
+                std::vector<uint32_t> addresses, expected, upper;
+                for (const auto& site : gc.ws_cull_relative_x_bound_sites) {
+                    addresses.push_back(site.address);
+                    expected.push_back(site.expected);
+                    upper.push_back(site.upper ? 1u : 0u);
+                }
+                gpu_ws_set_relative_x_bound_sites(addresses.data(), expected.data(),
+                    upper.data(), (int)addresses.size());
+            }
+            {
                 std::vector<uint32_t> addresses, expected, masks;
                 for (const auto& site : gc.ws_cull_masked_reject_sites) {
                     addresses.push_back(site.address);

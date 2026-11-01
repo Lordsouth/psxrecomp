@@ -298,6 +298,13 @@ per key; a longer list is logged rather than silently truncated. `bgez_sites`
 and `clip_edge_x_load_sites` enter the overlay-cache identity only when they
 are non-empty, so titles that do not use them keep their caches.
 
+`[[widescreen.cull.relative_x_bound]]` covers a bound the renderer forms
+from a register, `addi[u] rt, camera, imm` (a sprite cull's `screenX - 40` and
+`screenX + 360`): each entry names the full instruction word and whether it
+is the lower or the upper edge, which then moves out by the margin. See
+`docs/config_schema.md`. Digimon World (SLUS-01032) is the first user, for its
+map-sprite cull.
+
 `screen_x_sites` is the explicit form of the `auto_screen_x` compare, for a
 title whose width is not in `screen_w_imms` or whose function has no paired
 height compare. It takes five instructions:

@@ -77,6 +77,19 @@ uint32_t overlay_codegen_config_hash(const GameConfig& c) {
             h.u32(site.expected);
         }
     }
+    if (!c.ws_cull_relative_x_bound_sites.empty()) {
+        h.tag("cull_relative_x_bound");
+        auto sites = c.ws_cull_relative_x_bound_sites;
+        std::sort(sites.begin(), sites.end(), [](const auto& a, const auto& b) {
+            return (a.address & 0x1FFFFFFFu) < (b.address & 0x1FFFFFFFu);
+        });
+        h.u32((uint32_t)sites.size());
+        for (const auto& site : sites) {
+            h.u32(site.address & 0x1FFFFFFFu);
+            h.u32(site.expected);
+            h.u32(site.upper ? 1u : 0u);
+        }
+    }
     if (!c.ws_cull_masked_reject_sites.empty()) {
         h.tag("cull_masked_reject");
         auto sites = c.ws_cull_masked_reject_sites;
@@ -2496,6 +2509,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     std::vector<WidescreenSxyCullSite> ws_cull_sxy_sites;
     std::vector<WidescreenMaskedRejectSite> ws_cull_masked_reject_sites;
     std::vector<WidescreenPackedXSite> ws_cull_packed_x_sites;
+    std::vector<WidescreenRelativeBoundSite> ws_cull_relative_x_bound_sites;
     std::vector<WidescreenCullScaleSite> ws_cull_scale_sites;
     std::vector<WidescreenAngleSite> ws_cull_angle_sites;
     WidescreenAspectConeConfig ws_aspect_cone;
@@ -2585,6 +2599,38 @@ GameConfig load_game_config(const fs::path& config_path_in) {
                     ws_cull_packed_x_sites.push_back(site);
                     if (ws_cull_packed_x_sites.size() > 256)
                         throw std::runtime_error("packed_x supports at most 256 sites");
+                }
+            }
+            if (cull.contains("relative_x_bound")) {
+                std::set<uint32_t> seen;
+                for (const auto& item : toml::find<toml::array>(cull, "relative_x_bound")) {
+                    WidescreenRelativeBoundSite site;
+                    site.address = parse_hex(toml::find<std::string>(item, "address"),
+                                             "widescreen.cull.relative_x_bound.address");
+                    site.expected = parse_hex(toml::find<std::string>(item, "expected"),
+                                              "widescreen.cull.relative_x_bound.expected");
+                    const std::string edge = toml::find<std::string>(item, "edge");
+                    const uint32_t op = site.expected >> 26;
+                    if ((site.address & 3u) || (op != 0x08u && op != 0x09u) ||
+                        ((site.expected >> 21) & 31u) == 0u ||
+                        ((site.expected >> 16) & 31u) == 0u)
+                        throw std::runtime_error(fmt::format(
+                            "{}: [[widescreen.cull.relative_x_bound]] needs an aligned "
+                            "ADDI/ADDIU rt,rs,imm with rs and rt nonzero",
+                            config_path.string()));
+                    if (edge != "lower" && edge != "upper")
+                        throw std::runtime_error(fmt::format(
+                            "{}: [[widescreen.cull.relative_x_bound]] edge must be "
+                            "\"lower\" or \"upper\"",
+                            config_path.string()));
+                    site.upper = edge == "upper";
+                    if (!seen.insert(site.address & 0x1FFFFFFFu).second)
+                        throw std::runtime_error(fmt::format(
+                            "{}: duplicate [[widescreen.cull.relative_x_bound]] address 0x{:08X}",
+                            config_path.string(), site.address));
+                    ws_cull_relative_x_bound_sites.push_back(site);
+                    if (ws_cull_relative_x_bound_sites.size() > 256)
+                        throw std::runtime_error("relative_x_bound supports at most 256 sites");
                 }
             }
             if (cull.contains("keep")) {
@@ -3142,6 +3188,7 @@ GameConfig load_game_config(const fs::path& config_path_in) {
     loaded.ws_cull_clip_edge_width = ws_cull_clip_edge_width;
     loaded.ws_cull_masked_reject_sites = std::move(ws_cull_masked_reject_sites);
     loaded.ws_cull_packed_x_sites = std::move(ws_cull_packed_x_sites);
+    loaded.ws_cull_relative_x_bound_sites = std::move(ws_cull_relative_x_bound_sites);
     loaded.draw_distance_clamp_sites =
         parse_draw_distance_clamps(cfg, config_path);
     reject_quality_presets(cfg, config_path);

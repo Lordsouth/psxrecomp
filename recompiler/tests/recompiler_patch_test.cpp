@@ -5,6 +5,7 @@
 #include <functional>
 #include <stdexcept>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include "code_generator.h"
@@ -365,6 +366,56 @@ expected = "0x3C02FFF0"
               signed_bound_config.ws_signed_x_bound_sites[1].expected ==
                   0x3C02FFF0u,
           "parser preserves guarded signed pixel and Q16 X bounds");
+
+    const auto relative = write_config(root, "relative-x-bound", R"toml(
+[[widescreen.cull.relative_x_bound]]
+address = "0x800B4460"
+expected = "0x2282FFD8"
+edge = "lower"
+
+[[widescreen.cull.relative_x_bound]]
+address = "0x800B4468"
+expected = "0x24620168"
+edge = "upper"
+)toml");
+    const auto relative_config = PSXRecompV4::load_game_config(relative);
+    check(relative_config.ws_cull_relative_x_bound_sites.size() == 2 &&
+              relative_config.ws_cull_relative_x_bound_sites[0].address == 0x800B4460u &&
+              relative_config.ws_cull_relative_x_bound_sites[0].expected == 0x2282FFD8u &&
+              !relative_config.ws_cull_relative_x_bound_sites[0].upper &&
+              relative_config.ws_cull_relative_x_bound_sites[1].expected == 0x24620168u &&
+              relative_config.ws_cull_relative_x_bound_sites[1].upper,
+          "parser preserves guarded register-relative screen-X bounds");
+    check(PSXRecompV4::overlay_codegen_config_hash(relative_config) !=
+              PSXRecompV4::overlay_codegen_config_hash(PSXRecompV4::GameConfig{}),
+          "relative screen-X bounds enter the overlay cache identity");
+    for (const auto& [name, body, needle] : std::vector<std::tuple<std::string, std::string, std::string>>{
+             {"relative-zero-base", "expected = \"0x2402FFD8\"\nedge = \"lower\"",
+              "rs and rt nonzero"},
+             {"relative-not-add", "expected = \"0x2882FFD8\"\nedge = \"lower\"",
+              "ADDI/ADDIU"},
+             {"relative-bad-edge", "expected = \"0x2282FFD8\"\nedge = \"left\"",
+              "edge must be"},
+         }) {
+        const auto bad = write_config(root, name,
+            "[[widescreen.cull.relative_x_bound]]\naddress = \"0x800B4460\"\n" + body + "\n");
+        check_throws([&] { (void)PSXRecompV4::load_game_config(bad); }, needle,
+                     "parser rejects a malformed relative screen-X bound");
+    }
+    const auto relative_dup = write_config(root, "relative-dup", R"toml(
+[[widescreen.cull.relative_x_bound]]
+address = "0x800B4460"
+expected = "0x2282FFD8"
+edge = "lower"
+
+[[widescreen.cull.relative_x_bound]]
+address = "0x000B4460"
+expected = "0x2282FFD8"
+edge = "upper"
+)toml");
+    check_throws([&] { (void)PSXRecompV4::load_game_config(relative_dup); },
+                 "duplicate [[widescreen.cull.relative_x_bound]]",
+                 "parser rejects a relative screen-X bound listed twice");
 
     const auto bad_keep = write_config(root, "cull-keep-bad", R"toml(
 [[widescreen.cull.keep]]
@@ -935,6 +986,26 @@ void codegen_tests() {
     check(keep_overlay_mismatch.find("maximal object/model participation") ==
               std::string::npos,
           "overlay full-word mismatch leaves keep site unchanged");
+
+    PSXRecomp::CodeGenConfig relative_gen;
+    relative_gen.ws_cull_relative_x_bound_sites.push_back(
+        {0x80010000u, 0x2282FFD8u, false}); // addi v0,s4,-40
+    const std::string relative_lower = generate_first_instruction(
+        0x2282FFD8u, {}, false, relative_gen);
+    check(relative_lower.find("cpu->gpr[2] = cpu->gpr[20] + (uint32_t)((int32_t)-40 - "
+                              "psx_ws_x_margin());") != std::string::npos,
+          "codegen moves a lower relative bound out by the live margin");
+    relative_gen.ws_cull_relative_x_bound_sites[0] =
+        {0x80010000u, 0x24620168u, true}; // addiu v0,v1,360
+    const std::string relative_upper = generate_first_instruction(
+        0x24620168u, {}, false, relative_gen);
+    check(relative_upper.find("cpu->gpr[2] = cpu->gpr[3] + (uint32_t)((int32_t)360 + "
+                              "psx_ws_x_margin());") != std::string::npos,
+          "codegen moves an upper relative bound out by the live margin");
+    const std::string relative_overlay_mismatch = generate_first_instruction(
+        0x24620169u, {}, true, relative_gen); // addiu v0,v1,361 at the same VA
+    check(relative_overlay_mismatch.find("psx_ws_x_margin") == std::string::npos,
+          "overlay full-word mismatch leaves the relative bound vanilla");
 
     PSXRecomp::CodeGenConfig scale_config_gen;
     scale_config_gen.ws_cull_scale_sites.push_back(

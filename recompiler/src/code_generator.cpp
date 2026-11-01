@@ -1259,6 +1259,27 @@ std::string CodeGenerator::translate_instruction_core(uint32_t addr, uint32_t in
             reg_name(get_rt(instr)), comment);
     }
 
+    // Register-relative screen-X bounds ([[widescreen.cull.relative_x_bound]]):
+    // `addi[u] rt, rs, imm` with rs a camera or origin. The edge moves out by
+    // the live margin, which is 0 at 4:3, so the sum is the vanilla one there.
+    // Wrapping add, as for bias sites: the guarded constants are screen-sized.
+    for (const auto& site : config_.ws_cull_relative_x_bound_sites) {
+        if ((site.address & 0x1FFFFFFFu) != (addr & 0x1FFFFFFFu)) continue;
+        if (instr != site.expected) {
+            if (config_.overlay_mode) continue;
+            fmt::print(stderr, "ERROR: relative_x_bound expected 0x{:08X} at 0x{:08X}, found 0x{:08X}\n",
+                       site.expected, addr, instr);
+            std::exit(1);
+        }
+        std::string code = fmt::format(
+            "{} = {} + (uint32_t)((int32_t){} {} psx_ws_x_margin());"
+            "  /* guarded relative screen-X {} bound */",
+            reg_name(get_rt(instr)), reg_name(get_rs(instr)), (int)get_imm16(instr),
+            site.upper ? "+" : "-", site.upper ? "upper" : "lower");
+        PSXRecomp::append_pgxp_hooks(instr, code, memory_addr);
+        return config_.indent + code + comment;
+    }
+
     // Register-register frustum-edge compares ([[widescreen.cull.scale]]):
     // the configured operand is a +/-half_extent*z bound computed at runtime,
     // so it is scaled by the live reveal instead of rewriting an immediate.

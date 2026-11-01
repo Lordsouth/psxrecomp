@@ -432,6 +432,13 @@ void gpu_ws_set_packed_x_sites(const uint32_t *addresses,
                               const uint32_t *expected, int count);
 int psx_ws_cull_packed_x_site(uint32_t pc, uint32_t instr, uint32_t x,
                               uint32_t width, uint32_t *out);
+/* [[widescreen.cull.relative_x_bound]]: guarded `addi[u] rt,rs,imm` screen-X
+ * bounds. *delta is what the interpreter adds to the vanilla sum: -margin for
+ * a lower edge, +margin for an upper one, 0 at 4:3. */
+void gpu_ws_set_relative_x_bound_sites(const uint32_t *addresses,
+                                       const uint32_t *expected,
+                                       const uint32_t *upper, int count);
+int psx_ws_relative_x_bound_site(uint32_t pc, uint32_t instr, int32_t *delta);
 uint32_t psx_ws_angle_widen(uint32_t vanilla);
 int psx_ws_angle_site(uint32_t pc, uint32_t instr, uint32_t *out);
 /* bound * (half_extent + margin) / half_extent; identity at 4:3. */

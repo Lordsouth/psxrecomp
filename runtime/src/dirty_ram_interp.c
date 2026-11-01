@@ -2203,9 +2203,12 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
     case 0x08: /* ADDI rt, rs, simm — same as ADDIU, sans overflow trap (we don't model traps here) */
     {
         uint32_t widened = 0;
+        int32_t rel = 0;
         uint32_t a = cpu->gpr[rs];
         if (psx_ws_angle_site(pc, insn, &widened))
             cpu->gpr[rt] = widened;
+        else if (psx_ws_relative_x_bound_site(pc, insn, &rel))
+            cpu->gpr[rt] = a + (uint32_t)simm + (uint32_t)rel;
         else
             cpu->gpr[rt] = a + (uint32_t)simm
                          + (psx_ws_is_cull_bias_lower_site(pc)
@@ -2219,11 +2222,14 @@ static int exec_one_fetched_inner(CPUState *cpu, uint32_t pc, uint32_t insn,
     case 0x09: /* ADDIU rt, rs, simm */
     {
         uint32_t widened = 0;
+        int32_t rel = 0;
         uint32_t a = cpu->gpr[rs];
         if (psx_ws_angle_site(pc, insn, &widened))
             cpu->gpr[rt] = widened;
         else if (rs == 0 && rt != 0 && psx_ws_is_signed_x_bound_site(pc, insn))
             cpu->gpr[rt] = (uint32_t)psx_ws_screen_x_bound(simm);
+        else if (psx_ws_relative_x_bound_site(pc, insn, &rel))
+            cpu->gpr[rt] = a + (uint32_t)simm + (uint32_t)rel;
         else
             cpu->gpr[rt] = a + (uint32_t)simm
                          + (psx_ws_is_cull_bias_lower_site(pc)

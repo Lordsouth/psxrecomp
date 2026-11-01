@@ -403,6 +403,32 @@ expected = "0x2402FF00" # addiu v0,zero,-256
 - Site identity is the normalized physical address plus the complete
   instruction word. The helper is identity at 4:3.
 
+A screen-X bound computed from a register (a camera or origin plus a
+constant) is widened at the add that forms it:
+
+```toml
+[[widescreen.cull.relative_x_bound]]
+address = "0x800B4460"
+expected = "0x2282FFD8" # addi v0,s4,-40: screenX - 40
+edge = "lower"
+
+[[widescreen.cull.relative_x_bound]]
+address = "0x800B4468"
+expected = "0x20620168" # addi v0,v1,360: screenX + 360
+edge = "upper"
+```
+
+- `expected` must be `ADDI` or `ADDIU rt,rs,imm` with `rs` and `rt` nonzero
+  (`rs = $zero` is a constant: use `[[widescreen.signed_x_bound]]`).
+- `edge = "lower"` emits `rt = rs + (imm - margin)`, `"upper"` emits
+  `rt = rs + (imm + margin)`, with the live `psx_ws_x_margin()`; at 4:3 the
+  margin is 0 and the sum is the vanilla one. The add wraps, like `bias_sites`.
+- Site identity is the normalized physical address plus the complete
+  instruction word: a main-EXE mismatch is a build error, a nonmatching
+  overlay variant is left vanilla. Native code, overlay shards and the
+  dirty-RAM interpreter apply the same rule. The sites enter the overlay
+  cache identity only when used. Regenerate after changing them.
+
 Signed per-vertex screen-X culls can be listed site by site
 (`slti_sites`, `slti_lower_sites`, `bltz_sites`, `bgez_sites`,
 `clip_edge_x_load_sites` with `clip_edge_width`, `branch_keep_sites`). All are

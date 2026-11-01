@@ -1156,6 +1156,30 @@ int psx_ws_cull_packed_x_site(uint32_t pc, uint32_t instr, uint32_t x,
     }
     return 0;
 }
+typedef struct { uint32_t address, expected, upper; } WsRelativeBoundSite;
+static WsRelativeBoundSite ws_relative_bound_sites[WS_EXPLICIT_CULL_SITES_MAX];
+static int ws_relative_bound_n;
+void gpu_ws_set_relative_x_bound_sites(const uint32_t *addresses,
+                                       const uint32_t *expected,
+                                       const uint32_t *upper, int count) {
+    if (count < 0) count = 0;
+    if (count > WS_EXPLICIT_CULL_SITES_MAX) count = WS_EXPLICIT_CULL_SITES_MAX;
+    ws_relative_bound_n = count;
+    for (int i = 0; i < count; ++i) {
+        ws_relative_bound_sites[i].address = addresses[i] & 0x1FFFFFFFu;
+        ws_relative_bound_sites[i].expected = expected[i];
+        ws_relative_bound_sites[i].upper = upper[i] ? 1u : 0u;
+    }
+}
+int psx_ws_relative_x_bound_site(uint32_t pc, uint32_t instr, int32_t *delta) {
+    for (int i = 0; i < ws_relative_bound_n; ++i) {
+        const WsRelativeBoundSite *site = &ws_relative_bound_sites[i];
+        if (site->address != (pc & 0x1FFFFFFFu) || site->expected != instr) continue;
+        if (delta) *delta = site->upper ? psx_ws_x_margin() : -psx_ws_x_margin();
+        return 1;
+    }
+    return 0;
+}
 static WsCullKeepSite ws_cull_keep_sites[WS_EXPLICIT_CULL_SITES_MAX];
 static int ws_cull_keep_n = 0;
 void gpu_ws_set_cull_keep_sites(const uint32_t *addresses,

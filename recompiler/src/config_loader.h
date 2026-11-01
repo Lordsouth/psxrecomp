@@ -1018,6 +1018,15 @@ struct WidescreenPackedXSite {
     uint32_t expected = 0;
 };
 
+// One `ADDI/ADDIU rt, rs, imm` screen-X bound relative to a register (a
+// camera or origin), guarded by the complete instruction word. A lower edge
+// becomes imm - margin, an upper edge imm + margin; identity at 4:3.
+struct WidescreenRelativeBoundSite {
+    uint32_t address = 0;
+    uint32_t expected = 0;
+    bool upper = false;
+};
+
 struct GameConfig {
     std::filesystem::path config_path;
     std::filesystem::path project_root;
@@ -1557,6 +1566,8 @@ struct GameConfig {
     std::vector<ModImmediateSite> mod_immediate_sites;
     // Guarded SLTU on SX<<16 against screen width<<16; both wide edges.
     std::vector<WidescreenPackedXSite> ws_cull_packed_x_sites;
+    // [[widescreen.cull.relative_x_bound]]: register-relative screen-X bounds.
+    std::vector<WidescreenRelativeBoundSite> ws_cull_relative_x_bound_sites;
     // [widescreen] ui_offset_squash -- DR_OFFSET-phased UI counter-squash.
     // Kept off the positional aggregate init; assigned after construction.
     bool ws_ui_offset_squash = false;
