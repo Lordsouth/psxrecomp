@@ -257,7 +257,7 @@ void psx_mod_set_disc_request_provider(PSXModDiscRequestProvider provider);
 /* Effective-disc LBA and byte size of a file (directory records patched by
  * active mods apply, so a relocated file reports its new extent). */
 int psx_mod_disc_file_extent(const char* path, uint32_t* lba, uint32_t* size);
-/* Experimental retained-texture service (currently OpenGL only). IDs are
+/* Experimental retained-texture service (OpenGL and Software). IDs are
  * nonzero, stable game-owned identities, NOT GL names. Banks are immutable
  * 16-bit PS1 texels/indices with a caller-selected row pitch (width).
  * A missing bank may be reconstructed from original assets by the resolver,

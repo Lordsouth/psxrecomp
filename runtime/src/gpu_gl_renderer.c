@@ -6541,6 +6541,12 @@ int gl_renderer_select_texture_bank_live_clut(uint16_t id) {
     return 1;
 }
 
+/* Backend hook (both tables): the selects sync with the render thread. */
+static int glb_select_texture_bank(uint16_t id, int live_clut) {
+    return live_clut ? gl_renderer_select_texture_bank_live_clut(id)
+                     : gl_renderer_select_texture_bank(id);
+}
+
 int gl_renderer_init_context(SDL_Window *win) {
     s_win = win;
     s_present_w = 0;
@@ -11388,6 +11394,8 @@ static const GpuRenderBackend GL_BACKEND = {
     .wide_dump_full = glb_wide_dump_full,
     .set_depth_triangle = glb_set_depth_triangle,
     .wide_feedback_rect = glb_wide_feedback_rect,
+    .texture_banks_supported = gl_renderer_texture_banks_supported,
+    .select_texture_bank = glb_select_texture_bank,
 };
 
 /* ==== Render thread: recording, replay, hand-off ===========================
@@ -14598,6 +14606,8 @@ static const GpuRenderBackend GL_RT_BACKEND = {
     .hd_texture_note = rtb_hd_texture_note,
     .vram_upload_open = rtb_vram_upload_open,
     .wide_feedback_rect = rtb_wide_feedback_rect,
+    .texture_banks_supported = gl_renderer_texture_banks_supported,
+    .select_texture_bank = glb_select_texture_bank,
 };
 
 /* ---- replay (render thread) ---------------------------------------------- */

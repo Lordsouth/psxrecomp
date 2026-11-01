@@ -14,7 +14,26 @@
 #include "gpu_sw_renderer.h"
 #include "gpu_hd_textures.h"
 #include "gpu_uv.h"
+#include "mod_texture_banks.h"
 #include <stdio.h>
+
+/* Bank pixels reach guest-visible VRAM here, so not under the netplay
+ * CPU-authoritative raster; nor while an HD pack replaces or dumps textures
+ * (the GL rule: bank texels would be observed as VRAM pages). */
+static int sw_texture_banks_supported(void) {
+    return !sw_faithful_authority() && !gpu_hd_textures_active();
+}
+static int sw_select_texture_bank(uint16_t id, int live_clut) {
+    uint32_t w = 0, h = 0;
+    const uint16_t *px = NULL;
+    if (id) {
+        if (!sw_texture_banks_supported()) return 0;
+        px = mod_texture_bank_pixels(id, &w, &h);
+        if (!px) return 0;
+    }
+    sw_set_texture_source(px, (int)w, (int)h, live_clut);
+    return 1;
+}
 
 static const GpuRenderBackend SW_BACKEND = {
     .name                          = "software",
@@ -58,6 +77,8 @@ static const GpuRenderBackend SW_BACKEND = {
     .render_wide_display           = sw_render_wide_display,
     .wide_dump_full                = sw_wide_dump_full,
     .wide_feedback_rect            = sw_wide_feedback_rect,
+    .texture_banks_supported       = sw_texture_banks_supported,
+    .select_texture_bank           = sw_select_texture_bank,
 };
 
 /* Supplied by gpu_gl_renderer.c; returns NULL until the GL backend is ready. */
@@ -272,6 +293,14 @@ void gr_vram_transfer_out(int x, int y, int w, int h, uint16_t *d)       { g_b->
 void gr_set_draw_area(int x1, int y1, int x2, int y2){ g_b->set_draw_area(x1, y1, x2, y2); }
 void gr_get_draw_area(int *x1, int *y1, int *x2, int *y2) { g_b->get_draw_area(x1, y1, x2, y2); }
 void gr_set_draw_offset(int x, int y)                { g_b->set_draw_offset(x, y); g_hd_offset_x=x; g_hd_offset_y=y; }
+
+int gr_texture_banks_supported(void) {
+    return g_b->texture_banks_supported && g_b->texture_banks_supported();
+}
+int gr_select_texture_bank(uint16_t id, int live_clut) {
+    if (!g_b->select_texture_bank) return !id;
+    return g_b->select_texture_bank(id, live_clut);
+}
 
 /* Native-wide compositor — present only on backends that supply it. */
 int  gr_wide_supported(void) { return g_b->render_wide_display != 0; }

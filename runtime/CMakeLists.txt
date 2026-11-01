@@ -1967,6 +1967,14 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME sw_faithful_authority_test COMMAND sw_faithful_authority_test)
 
+    # The software renderer draws retained texture banks (gr_select_texture_bank).
+    add_executable(sw_texture_banks_test tests/test_sw_texture_banks.c)
+    target_include_directories(sw_texture_banks_test PRIVATE include src)
+    if(NOT WIN32)
+        target_link_libraries(sw_texture_banks_test PRIVATE m)
+    endif()
+    add_test(NAME sw_texture_banks_test COMMAND sw_texture_banks_test)
+
     add_executable(gpu_vk_upload_alignment_test
         tests/test_gpu_vk_upload_alignment.c)
     target_include_directories(gpu_vk_upload_alignment_test PRIVATE src)

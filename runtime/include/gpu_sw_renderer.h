@@ -44,6 +44,11 @@ uint32_t sw_perspective_triangle_count(void);
 void sw_set_texture_filter(int bilinear);
 int  sw_texture_filter(void);
 
+/* Texel source for the following draws: a retained texture bank (w x h
+ * 16-bit words addressed like VRAM, 0 outside it; palette reads too unless
+ * live_clut), or VRAM when pixels is NULL. Banks are point-sampled. */
+void sw_set_texture_source(const uint16_t *pixels, int w, int h, int live_clut);
+
 /* Netplay CPU-authoritative VRAM (dual-raster SW@1x or the software GPU):
  * on = ignore the precise/perspective overrides and texture filtering, so the
  * guest-visible VRAM (GP0 C0 readback, savestates) is the hardware image on

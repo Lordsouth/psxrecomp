@@ -153,6 +153,12 @@ int  gr_wide_dump_full(uint32_t *out, int cap_pixels, int *ow, int *oh, int base
 int  gr_render_wide_display(uint32_t *out, int pitch, int base_x,
                             int disp_y, int disp_h);
 
+/* Retained texture banks (mod_texture_banks.h): whether the backend can draw
+ * them now, and the texel source for the following draws. live_clut keeps
+ * palette reads in VRAM; id 0 restores VRAM. 0 = refused (draw nothing). */
+int  gr_texture_banks_supported(void);
+int  gr_select_texture_bank(uint16_t id, int live_clut);
+
 /* ---- Backend vtable -----------------------------------------------------
  * A backend supplies the same set of functions.  gpu_gl_renderer.c (Phase 2)
  * provides gl_backend_get(); until it does, requesting OpenGL falls back to
@@ -247,6 +253,10 @@ typedef struct GpuRenderBackend {
     void (*wide_feedback_rect)(int src_base, int src_x, int src_y, int dst_x,
                                int dst_y, int w, int h, int r, int g, int b,
                                int raw, int semi);
+    /* Appended: gr_texture_banks_supported / gr_select_texture_bank.
+     * NULL = the backend draws no banks. */
+    int  (*texture_banks_supported)(void);
+    int  (*select_texture_bank)(uint16_t id, int live_clut);
 } GpuRenderBackend;
 
 enum { GR_HD_NOTE_INVALIDATE = 0, GR_HD_NOTE_TRACK_UPLOAD = 1,

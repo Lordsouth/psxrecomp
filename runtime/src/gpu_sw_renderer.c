@@ -122,6 +122,19 @@ static inline uint16_t vram_get(int x, int y) {
     return g_vram[y * VRAM_WIDTH + x];
 }
 
+/* Retained texture bank selected as the texel source (sw_set_texture_source);
+ * NULL = VRAM. Addressed like VRAM, 0 outside the bank (the GL shader's
+ * vram_at/palette_at); palette reads stay in VRAM when g_bank_live_clut. */
+static const uint16_t *g_bank_px;
+static int g_bank_w, g_bank_h, g_bank_live_clut;
+
+static inline uint16_t tex_get(int x, int y, int palette) {
+    if (!g_bank_px || (palette && g_bank_live_clut)) return vram_get(x, y);
+    x &= (VRAM_WIDTH - 1);
+    y &= (VRAM_HEIGHT - 1);
+    return x < g_bank_w && y < g_bank_h ? g_bank_px[y * g_bank_w + x] : 0;
+}
+
 /* ------------------------------------------------------------------ */
 /* Render target — selects native VRAM or the hi-res mirror.          */
 /*                                                                    */
@@ -353,22 +366,22 @@ static uint16_t texel_fetch(int u, int v, uint16_t texpage,
     case 0: { /* 4-bit CLUT */
         int vram_x = tpx + (u / 4);
         int vram_y = tpy + v;
-        uint16_t texel_word = vram_get(vram_x, vram_y);
+        uint16_t texel_word = tex_get(vram_x, vram_y, 0);
         int shift = (u & 3) * 4;
         int index = (texel_word >> shift) & 0xF;
-        return vram_get(clut_x + index, clut_y);
+        return tex_get(clut_x + index, clut_y, 1);
     }
     case 1: { /* 8-bit CLUT */
         int vram_x = tpx + (u / 2);
         int vram_y = tpy + v;
-        uint16_t texel_word = vram_get(vram_x, vram_y);
+        uint16_t texel_word = tex_get(vram_x, vram_y, 0);
         int shift = (u & 1) * 8;
         int index = (texel_word >> shift) & 0xFF;
-        return vram_get(clut_x + index, clut_y);
+        return tex_get(clut_x + index, clut_y, 1);
     }
     case 2:   /* 15-bit direct */
     case 3: {
-        return vram_get(tpx + u, tpy + v);
+        return tex_get(tpx + u, tpy + v, 0);
     }
     default:
         return 0;
@@ -530,7 +543,7 @@ int sw_renderer_scale(void) { return g_scale; }
  * C0 (V8:2 samples its own frame), forking guest RAM between peers. */
 void sw_set_faithful_authority(int on) {
     g_faithful_authority = on ? 1 : 0;
-    g_texture_filter = g_faithful_authority ? 0 : g_texture_filter_req;
+    g_texture_filter = g_faithful_authority || g_bank_px ? 0 : g_texture_filter_req;
     if (g_faithful_authority) {
         g_precise_valid = 0;
         g_perspective_valid = 0;
@@ -587,9 +600,17 @@ static inline void precise_consumed(void) {
 
 void sw_set_texture_filter(int bilinear) {
     g_texture_filter_req = bilinear ? 1 : 0;
-    g_texture_filter = g_faithful_authority ? 0 : g_texture_filter_req;
+    g_texture_filter = g_faithful_authority || g_bank_px ? 0 : g_texture_filter_req;
 }
 int  sw_texture_filter(void) { return g_texture_filter; }
+
+void sw_set_texture_source(const uint16_t *pixels, int w, int h, int live_clut) {
+    g_bank_px = pixels;
+    g_bank_w = w; g_bank_h = h;
+    g_bank_live_clut = pixels && live_clut;
+    /* Bank texels are point-sampled, as on GL. */
+    g_texture_filter = g_faithful_authority || g_bank_px ? 0 : g_texture_filter_req;
+}
 
 /* ------------------------------------------------------------------ */
 /* Draw state setters                                                 */

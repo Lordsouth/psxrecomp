@@ -10,11 +10,14 @@ outside guest RAM/VRAM. The first consumer is Crash's N. Sanity Beach experiment
   sector patches; never seeks the emulated CD controller. ISO path lookup
   walks every component, so nested paths (`\MAP\MAP5\FILE.TFS`) work.
 - Immutable texture banks: stable nonzero 16-bit IDs, owned copies of PS1
-  texels/indices and palettes, lazy OpenGL upload. ID 0 means ordinary VRAM.
+  texels/indices and palettes, lazy OpenGL upload (Software samples the owned
+  copy directly, point-sampled as on GL). ID 0 means ordinary VRAM.
   256 MiB aggregate host budget, maximum 1024x512 words per bank. A resolver can
   rebuild a missing bank after a cold save-state restore. IDs must not be reused
-  for different assets during a process lifetime. Software/Vulkan and the GL
-  CPU-authoritative dual path report unsupported.
+  for different assets during a process lifetime. Vulkan, the GL
+  CPU-authoritative dual path, the software raster under netplay authority and
+  any backend while an HD pack replaces or dumps report unsupported. On
+  Software, bank pixels are drawn into guest-visible VRAM like any draw.
 - Live-palette banks (`psx_mod_define_texture_bank_live_clut`): indexed texels
   only; GT3 packets naming one take their CLUT from live VRAM, as the 16x16
   BG2D bank path always did, so palette uploads (fades, time of day) apply.

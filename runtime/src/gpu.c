@@ -5997,11 +5997,9 @@ static void gp0_exec_shaded_textured_tri(void) {
     if (draw_area_out_bbox(vx, vy, 3)) return;
 
     uint16_t host_bank = mod_texture_packet_bank(gp0_cmd_source_addr, gp0_cmd_buf, 9u);
-    if (host_bank && (gr_backend() != GR_BACKEND_OPENGL ||
-                      !gl_renderer_texture_banks_supported() ||
-                      !(mod_texture_bank_live_clut(host_bank)
-                            ? gl_renderer_select_texture_bank_live_clut(host_bank)
-                            : gl_renderer_select_texture_bank(host_bank)))) return;
+    if (host_bank && (!gr_texture_banks_supported() ||
+                      !gr_select_texture_bank(host_bank,
+                                              mod_texture_bank_live_clut(host_bank)))) return;
 
     gr_set_semi_transparency(semi_trans, (int)semi_transparency);
     prepare_precise_triangle(1, 4, 7,
@@ -6024,11 +6022,11 @@ static void gp0_exec_shaded_textured_tri(void) {
                                      vx[1], vy[1], u[1], v[1], c[1],
                                      vx[2], vy[2], u[2], v[2], c[2],
                                      clut_x, clut_y, tpage, raw_texture);
-    if (host_bank) (void)gl_renderer_select_texture_bank(0);
+    if (host_bank) (void)gr_select_texture_bank(0, 0);
 }
 
 int psx_mod_texture_banks_supported(void) {
-    return gr_backend() == GR_BACKEND_OPENGL && gl_renderer_texture_banks_supported();
+    return gr_texture_banks_supported();
 }
 
 /* Execute shaded textured quad (GP0 0x3C-0x3F) */
@@ -6467,8 +6465,7 @@ static void gp0_exec_textured_16x16(void) {
     uint16_t bank = host_tile &&
         (psx_read_word(host_packet + 28u) & ~GPU_WS_BG2D_MIRROR_X) == GPU_WS_BG2D_BANK_PACKET_MAGIC ?
         (uint16_t)(psx_read_word(host_packet + 16u) >> 16) : 0;
-    if (bank && (gr_backend() != GR_BACKEND_OPENGL ||
-        !gl_renderer_select_texture_bank_live_clut(bank))) return;
+    if (bank && !gr_select_texture_bank(bank, 1)) return;
     setup_textured_draw(color24, semi_trans, raw_texture);
     if (host_tile && (psx_read_word(host_packet + 28u) & GPU_WS_BG2D_MIRROR_X))
         gr_draw_textured_rect_scaled(x0, y0, 16, 16, u0 + 15, v0, u0 - 1, v0 + 16,
@@ -6478,7 +6475,7 @@ static void gp0_exec_textured_16x16(void) {
                                      clut_x, clut_y, current_texpage());
     else
         gr_draw_textured_rect(x0, y0, 16, 16, u0, v0, clut_x, clut_y, current_texpage());
-    if (bank) (void)gl_renderer_select_texture_bank(0);
+    if (bank) (void)gr_select_texture_bank(0, 0);
 }
 
 /* ---- GP0 command execution ---- */
