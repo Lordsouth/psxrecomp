@@ -5,7 +5,7 @@
 #include <string.h>
 #include <math.h>
 
-typedef struct { uint16_t* pixels; uint32_t width, height; int live_clut; } Bank;
+typedef struct { uint16_t* pixels; uint32_t width, height; int live_clut; uint16_t (*uploads)[4]; uint32_t upload_count; } Bank;
 typedef struct { uint32_t begin, size; } PacketArena;
 static Bank banks[65536];
 static PacketArena arenas[16];
@@ -63,6 +63,30 @@ const uint16_t* mod_texture_bank_pixels(uint16_t id, uint32_t* w, uint32_t* h) {
     }
     *w = banks[id].width; *h = banks[id].height;
     return banks[id].pixels;
+}
+
+int psx_mod_texture_bank_add_upload(uint16_t id, uint32_t x, uint32_t y,
+                                    uint32_t w, uint32_t h) {
+    Bank* bank = &banks[id];
+    uint16_t (*grown)[4];
+    uint32_t i;
+    if (!id || !bank->pixels || !w || !h || x + w > bank->width || y + h > bank->height)
+        return 0;
+    for (i = 0; i < bank->upload_count; ++i)   /* a resolver may declare again */
+        if (bank->uploads[i][0] == x && bank->uploads[i][1] == y &&
+            bank->uploads[i][2] == w && bank->uploads[i][3] == h) return 1;
+    grown = (uint16_t (*)[4])realloc(bank->uploads, (bank->upload_count + 1u) * sizeof *grown);
+    if (!grown) return 0;
+    bank->uploads = grown;
+    grown[bank->upload_count][0] = (uint16_t)x; grown[bank->upload_count][1] = (uint16_t)y;
+    grown[bank->upload_count][2] = (uint16_t)w; grown[bank->upload_count][3] = (uint16_t)h;
+    bank->upload_count++;
+    return 1;
+}
+
+uint32_t mod_texture_bank_uploads(uint16_t id, const uint16_t (**uploads)[4]) {
+    *uploads = banks[id].uploads;
+    return banks[id].upload_count;
 }
 
 int mod_texture_bank_live_clut(uint16_t id) {

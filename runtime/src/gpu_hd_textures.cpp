@@ -2,6 +2,7 @@
 #include "gpu_gl_renderer.h"
 #include "hd_texture_pack.h"
 #include "duckstation_texture_pack.h"
+#include "mod_texture_banks.h"
 
 #include <algorithm>
 #include <array>
@@ -16,6 +17,7 @@
 #include <memory>
 #include <new>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -38,6 +40,17 @@ struct Composition {
     uint64_t cache_key = 0, last_use = 0;
     uint64_t ready_mask = 0;
 };
+/* A mod's host texture bank as a second word space: its pixels laid out like
+ * VRAM, with the residency of the game uploads it holds (declared by the mod,
+ * psx_mod_texture_bank_add_upload). A replacement authored against those
+ * uploads in real VRAM keys the same words here, so bank draws find it. */
+struct BankHd {
+    std::vector<uint16_t> vram;
+    HdTexturePackTracking* beetle = nullptr;
+    DuckTexturePackTracking* duck = nullptr;
+    uint32_t uploads = 0;
+    ~BankHd() { hd_texture_pack_tracking_destroy(beetle); duck_texture_pack_tracking_destroy(duck); }
+};
 struct Session {
     std::string root;
     HdTexturePack* beetle = nullptr;
@@ -55,7 +68,8 @@ struct Session {
      * restage can re-verify them against the restored VRAM (bounded). */
     std::vector<std::array<uint16_t, 4>> learned;
     GpuHdTextureDiag diag{};
-    ~Session() { hd_texture_pack_destroy(beetle); duck_texture_pack_destroy(duck); }
+    std::unordered_map<uint16_t, std::unique_ptr<BankHd>> banks;
+    ~Session() { banks.clear(); hd_texture_pack_destroy(beetle); duck_texture_pack_destroy(duck); }
 };
 struct Lease {
     HdTexturePixels beetle{};
@@ -257,8 +271,9 @@ std::shared_ptr<Composition> compose(const HdTextureDrawQuery& query,
     return result;
 }
 bool dumps_suppressed = false;
+bool bank_query = false;   /* bank words are not guest VRAM: never dumped */
 void dump_query(const HdTextureDrawQuery& query, int semi) {
-    if (!session->dump || session->dump_failed || dumps_suppressed) return;
+    if (!session->dump || session->dump_failed || dumps_suppressed || bank_query) return;
     char error[256]{};
     const int status = duck_texture_pack_dump_draw(session->duck, &query, semi, error, sizeof(error));
     if (status == HD_TEXTURE_LOOKUP_FOUND) ++session->diag.dumped_textures;
@@ -656,6 +671,63 @@ extern "C" int gpu_hd_textures_acquire_draw(uint16_t tp, uint16_t cx, uint16_t c
 extern "C" int gpu_hd_textures_acquire_gl_draw(uint16_t tp, uint16_t cx, uint16_t cy,
     const int limits[4], uint32_t window, int semi, GpuHdTextureImage* image) {
     return acquire_draw(tp, cx, cy, limits, window, semi, image, true);
+}
+static void swap_bank_tracking(BankHd& bank) {
+    hd_texture_pack_swap_tracking(session->beetle, bank.beetle);
+    duck_texture_pack_swap_tracking(session->duck, bank.duck);
+}
+static BankHd* bank_context(uint16_t id) {
+    uint32_t width = 0, height = 0;
+    const uint16_t* pixels = mod_texture_bank_pixels(id, &width, &height);
+    const uint16_t (*uploads)[4] = nullptr;
+    const uint32_t count = pixels ? mod_texture_bank_uploads(id, &uploads) : 0;
+    if (!count) return nullptr;
+    auto& slot = session->banks[id];
+    if (slot && slot->uploads == count) return slot.get();
+    auto bank = std::unique_ptr<BankHd>(new (std::nothrow) BankHd);
+    if (!bank) return nullptr;
+    try { bank->vram.assign(kVramWords, 0); } catch (const std::exception&) { return nullptr; }
+    for (uint32_t row = 0; row < height; ++row)
+        std::memcpy(&bank->vram[size_t(row) * 1024u], pixels + size_t(row) * width, width * sizeof(uint16_t));
+    bank->beetle = session->beetle ? hd_texture_pack_tracking_create() : nullptr;
+    bank->duck = session->duck ? duck_texture_pack_tracking_create() : nullptr;
+    if ((session->beetle && !bank->beetle) || (session->duck && !bank->duck)) return nullptr;
+    std::vector<uint16_t> words;
+    swap_bank_tracking(*bank);
+    for (uint32_t i = 0; i < count; ++i) {
+        const uint16_t x = uploads[i][0], y = uploads[i][1], w = uploads[i][2], h = uploads[i][3];
+        words.resize(size_t(w) * h);
+        for (unsigned r = 0; r < h; ++r)
+            std::memcpy(&words[size_t(r) * w], &bank->vram[size_t(y + r) * 1024u + x], w * sizeof(uint16_t));
+        hd_texture_pack_track_upload(session->beetle, x, y, w, h, words.data(), words.size(), nullptr);
+        duck_texture_pack_track_upload(session->duck, x, y, w, h, bank->vram.data(), kVramWords);
+    }
+    swap_bank_tracking(*bank);
+    bank->uploads = count;
+    slot = std::move(bank);
+    return slot.get();
+}
+extern "C" int gpu_hd_textures_acquire_gl_bank_draw(uint16_t bank_id, int live_clut,
+    uint16_t tp, uint16_t cx, uint16_t cy, const int limits[4], uint32_t window, int semi,
+    GpuHdTextureImage* image) {
+    if (!image) return 0;
+    *image = {};
+    if (!session || !session->replacements || !native_vram) return 0;
+    BankHd* bank = bank_context(bank_id);
+    if (!bank) return 0;
+    /* A live-palette bank reads its CLUT from guest VRAM, as the draw does. */
+    if (live_clut && cy < 512 && cx < 1024)
+        std::memcpy(&bank->vram[size_t(cy) * 1024u + cx], &native_vram[size_t(cy) * 1024u + cx],
+                    std::min<size_t>(256u, 1024u - cx) * sizeof(uint16_t));
+    const uint16_t* guest = native_vram;
+    native_vram = bank->vram.data();
+    bank_query = true;
+    swap_bank_tracking(*bank);
+    const int found = acquire_draw(tp, cx, cy, limits, window, semi, image, true);
+    swap_bank_tracking(*bank);
+    bank_query = false;
+    native_vram = guest;
+    return found;
 }
 extern "C" void gpu_hd_textures_release_image(GpuHdTextureImage* image) {
     if (!image) return;

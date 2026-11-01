@@ -1114,6 +1114,32 @@ int hd_texture_pack_debug_uploads_at(const HdTexturePack* pack, unsigned x, unsi
     return n;
 }
 
+struct HdTexturePackTracking {
+    uint64_t next_upload_serial = 1;
+    std::vector<Upload> uploads;
+    std::array<std::vector<uint64_t>, kUploadIndexCells> upload_index;
+    std::unordered_map<uint64_t, Upload*> upload_by_serial;
+    Rect upload_bounds{};
+};
+
+HdTexturePackTracking* hd_texture_pack_tracking_create(void) {
+    return new (std::nothrow) HdTexturePackTracking;
+}
+
+void hd_texture_pack_tracking_destroy(HdTexturePackTracking* tracking) {
+    delete tracking;
+}
+
+void hd_texture_pack_swap_tracking(HdTexturePack* pack, HdTexturePackTracking* tracking) {
+    if (!pack || !tracking) return;
+    /* vector/map swaps keep element addresses, so upload_by_serial stays valid. */
+    std::swap(pack->next_upload_serial, tracking->next_upload_serial);
+    pack->uploads.swap(tracking->uploads);
+    pack->upload_index.swap(tracking->upload_index);
+    pack->upload_by_serial.swap(tracking->upload_by_serial);
+    std::swap(pack->upload_bounds, tracking->upload_bounds);
+}
+
 void hd_texture_pack_reset_tracking(HdTexturePack* pack) {
     if (pack) {
         pack->uploads.clear();

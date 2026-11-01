@@ -740,6 +740,7 @@ static void present_bezel(int ww, int wh, int lx, int ly, int lw, int lh);
 static int           s_raster_ok = 0;      /* full GPU pipeline available */
 static GLuint s_bank_tex[65536];
 static GLuint s_selected_bank_tex;
+static uint16_t s_selected_bank_id;   /* mod bank id, for HD lookups */
 static int s_selected_bank_live_clut, s_tb_bank_live_clut;
 
 /* Authoritative VRAM: hr color texture + stencil (mask bit) FBO. */
@@ -4926,11 +4927,15 @@ static void gpu_textured_triangle(const int *xs, const int *ys,
         flush_pack_if_sampling(-1, 0, depth, clut_x, clut_y);
     GpuHdTextureImage hd = {0};
     GLuint hd_tex = 0;
-    if (s_hd_native_authority && !s_selected_bank_tex) {
+    if (s_hd_native_authority) {
         uint32_t window = (uint32_t)(s_tw_mask_x | (s_tw_mask_y << 5) |
                                     (s_tw_off_x << 10) | (s_tw_off_y << 15));
-        if (gpu_hd_textures_acquire_gl_draw(texpage, clut_x, clut_y, lim, window,
-                                        semi >= 0, &hd)) {
+        /* A bank draw looks up the game uploads its mod declared in the bank. */
+        if (s_selected_bank_tex
+                ? gpu_hd_textures_acquire_gl_bank_draw(s_selected_bank_id, s_selected_bank_live_clut,
+                      texpage, clut_x, clut_y, lim, window, semi >= 0, &hd)
+                : gpu_hd_textures_acquire_gl_draw(texpage, clut_x, clut_y, lim, window,
+                      semi >= 0, &hd)) {
             hd_tex = hd_gl_texture(&hd);
             if (!hd_tex) hd.alpha_mode = 0;
             else gpu_hd_textures_note_applied();
@@ -5545,7 +5550,7 @@ static void glb_draw_textured_triangle(int x0,int y0,int u0,int v0,int x1,int y1
         float col[9]={mr,mg,mb, mr,mg,mb, mr,mg,mb};
         gpu_textured_triangle(xs,ys,us,vs,col,tp,cx,cy,s_mod_raw, s_semi_en?s_semi_mode:-1, NULL);
     }
-    if (native_required && s_hd_native_authority) {
+    if (native_required && s_hd_native_authority && !s_selected_bank_tex) {
         int faithful = native_draw_begin();
         sw_draw_textured_triangle(x0,y0,u0,v0,x1,y1,u1,v1,x2,y2,u2,v2,cx,cy,tp);
         native_draw_end(faithful);
@@ -5562,7 +5567,7 @@ static void glb_draw_shaded_textured_triangle(int x0,int y0,int u0,int v0,uint32
         for (int i=0;i<3;i++){ col[i*3+0]=(cc[i]&0xFF)/255.0f; col[i*3+1]=((cc[i]>>8)&0xFF)/255.0f; col[i*3+2]=((cc[i]>>16)&0xFF)/255.0f; }
         gpu_textured_triangle(xs,ys,us,vs,col,tp,cx,cy,raw, s_semi_en?s_semi_mode:-1, NULL);
     }
-    if (native_required && s_hd_native_authority) {
+    if (native_required && s_hd_native_authority && !s_selected_bank_tex) {
         int faithful = native_draw_begin();
         sw_draw_shaded_textured_triangle(x0,y0,u0,v0,c0,x1,y1,u1,v1,c1,x2,y2,u2,v2,c2,cx,cy,tp,raw);
         native_draw_end(faithful);
@@ -5584,7 +5589,7 @@ static void glb_draw_textured_rect(int x,int y,int w,int h,int u,int v,uint16_t 
         sw_draw_textured_rect(x,y,w,h,u,v,cx,cy,tp);
     if (s_raster_ok)
         { s_prim_rect = 1; gpu_textured_rect(x,y,w,h, u,v, u+w,v+h, cx,cy,tp, s_semi_en?s_semi_mode:-1); s_prim_rect = 0; }
-    if (native_required && s_hd_native_authority) {
+    if (native_required && s_hd_native_authority && !s_selected_bank_tex) {
         int faithful = native_draw_begin();
         sw_draw_textured_rect(x,y,w,h,u,v,cx,cy,tp);
         native_draw_end(faithful);
@@ -5596,7 +5601,7 @@ static void glb_draw_textured_rect_scaled(int x,int y,int w,int h,int u0,int v0,
         sw_draw_textured_rect_scaled(x,y,w,h,u0,v0,u1,v1,cx,cy,tp);
     if (s_raster_ok)
         { s_prim_rect = 1; gpu_textured_rect(x,y,w,h, u0,v0, u1,v1, cx,cy,tp, s_semi_en?s_semi_mode:-1); s_prim_rect = 0; }
-    if (native_required && s_hd_native_authority) {
+    if (native_required && s_hd_native_authority && !s_selected_bank_tex) {
         int faithful = native_draw_begin();
         sw_draw_textured_rect_scaled(x,y,w,h,u0,v0,u1,v1,cx,cy,tp);
         native_draw_end(faithful);
@@ -6379,7 +6384,7 @@ static int init_gpu_raster(void) {
 int gl_renderer_texture_banks_supported(void) {
     /* A trusted title's bank pixels affect GL presentation only. Keep the
      * existing software @1x VRAM authority during its delay-sync session. */
-    return s_raster_ok && !s_hd_native_authority &&
+    return s_raster_ok &&
            (!s_cpu_auth_dual || (psx_mod_netplay_is_active() &&
                                 psx_mod_netplay_requires_texture_banks()));
 }
@@ -6505,7 +6510,7 @@ int gl_renderer_select_texture_bank(uint16_t id) {
     const uint16_t* pixels;
     GLint alignment, row_length;
     s_selected_bank_live_clut = 0;
-    if (!id) { s_selected_bank_tex = 0; return 1; }
+    if (!id) { s_selected_bank_tex = 0; s_selected_bank_id = 0; return 1; }
     if (!gl_renderer_texture_banks_supported()) return 0;
     if (!s_bank_tex[id]) {
         pixels = mod_texture_bank_pixels(id, &width, &height);
@@ -6531,6 +6536,7 @@ int gl_renderer_select_texture_bank(uint16_t id) {
         }
     }
     s_selected_bank_tex = s_bank_tex[id];
+    s_selected_bank_id = id;
     return 1;
 }
 

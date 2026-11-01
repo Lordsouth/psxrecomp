@@ -132,6 +132,13 @@ void hd_texture_pack_invalidate(HdTexturePack* pack,
                                 uint16_t width_words,
                                 uint16_t height);
 void hd_texture_pack_reset_tracking(HdTexturePack* pack);
+/* A second upload residency set over a different word space (a mod's host
+ * texture bank, laid out like VRAM). swap exchanges it with the pack's live
+ * set in O(1); the caller swaps back before any native VRAM tracking runs. */
+typedef struct HdTexturePackTracking HdTexturePackTracking;
+HdTexturePackTracking* hd_texture_pack_tracking_create(void);
+void hd_texture_pack_tracking_destroy(HdTexturePackTracking* tracking);
+void hd_texture_pack_swap_tracking(HdTexturePack* pack, HdTexturePackTracking* tracking);
 
 /* Beetle-style upload residency is host metadata, but it is required for an
  * HD replacement to keep matching after a savestate restores the same VRAM.

@@ -124,6 +124,12 @@ void duck_texture_pack_invalidate(DuckTexturePack* pack,
                                   uint16_t x, uint16_t y,
                                   uint16_t width_words, uint16_t height);
 void duck_texture_pack_reset_tracking(DuckTexturePack* pack);
+/* As hd_texture_pack_swap_tracking: a second residency set (uploads, page
+ * sources and their caches) over another word space, exchanged in O(1). */
+typedef struct DuckTexturePackTracking DuckTexturePackTracking;
+DuckTexturePackTracking* duck_texture_pack_tracking_create(void);
+void duck_texture_pack_tracking_destroy(DuckTexturePackTracking* tracking);
+void duck_texture_pack_swap_tracking(DuckTexturePack* pack, DuckTexturePackTracking* tracking);
 /* Same-session reload only: clone immutable sources and owned observations
  * while the caller keeps native VRAM unchanged. Lookup/image caches remain
  * independent; only same-root filename deduplication history is shared.

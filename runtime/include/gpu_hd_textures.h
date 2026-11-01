@@ -104,6 +104,12 @@ int gpu_hd_textures_acquire_gl_draw(uint16_t texpage, uint16_t clut_x,
     uint16_t clut_y, const int limits[4], uint32_t texture_window,
     int semitransparent, GpuHdTextureImage* image);
 
+/* The same for a draw sampling a mod's host texture bank (mod_texture_banks):
+ * matched against the game uploads the mod declared inside that bank. */
+int gpu_hd_textures_acquire_gl_bank_draw(uint16_t bank_id, int live_clut,
+    uint16_t texpage, uint16_t clut_x, uint16_t clut_y, const int limits[4],
+    uint32_t texture_window, int semitransparent, GpuHdTextureImage* image);
+
 #ifdef __cplusplus
 }
 #endif

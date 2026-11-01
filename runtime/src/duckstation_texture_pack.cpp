@@ -371,6 +371,31 @@ struct DuckTexturePack {
     Worker worker;
 };
 
+struct DuckTexturePackTracking {
+    std::vector<Upload> uploads;
+    std::vector<PageSource> pages;
+    std::deque<std::shared_ptr<Source>> sources;
+    std::vector<CopyUpdate> copy_updates;
+    Rect copy_destination{};
+    bool copy_pending = false;
+    std::vector<RectHash> rect_cache;
+    std::vector<MatchCache> match_cache;
+    size_t snapshot_bytes = 0, palette_records = 0;
+};
+
+DuckTexturePackTracking* duck_texture_pack_tracking_create(void) {
+    return new (std::nothrow) DuckTexturePackTracking;
+}
+void duck_texture_pack_tracking_destroy(DuckTexturePackTracking* tracking) { delete tracking; }
+void duck_texture_pack_swap_tracking(DuckTexturePack* p, DuckTexturePackTracking* t) {
+    if (!p || !t) return;
+    p->uploads.swap(t->uploads); p->pages.swap(t->pages); p->sources.swap(t->sources);
+    p->copy_updates.swap(t->copy_updates);
+    std::swap(p->copy_destination, t->copy_destination); std::swap(p->copy_pending, t->copy_pending);
+    p->rect_cache.swap(t->rect_cache); p->match_cache.swap(t->match_cache);
+    std::swap(p->snapshot_bytes, t->snapshot_bytes); std::swap(p->palette_records, t->palette_records);
+}
+
 namespace {
 void note(DuckTexturePack& p, const std::string& s) {
     ++p.ignored;

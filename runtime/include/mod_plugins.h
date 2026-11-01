@@ -278,6 +278,12 @@ int psx_mod_define_texture_bank(uint16_t id, uint32_t width, uint32_t height,
 int psx_mod_define_texture_bank_live_clut(uint16_t id, uint32_t width,
                                           uint32_t height, const uint16_t* pixels);
 void psx_mod_set_texture_bank_resolver(PSXModTextureBankResolver resolver);
+/* Declare that the bank rectangle {x, y, width words, height} holds exactly
+ * the words of one game VRAM upload. HD texture packs key replacements by
+ * upload, so this is what lets bank draws use them: without it a bank draw
+ * stays native while an HD pack is active. Call after defining the bank. */
+int psx_mod_texture_bank_add_upload(uint16_t id, uint32_t x, uint32_t y,
+                                    uint32_t width, uint32_t height);
 /* Default-off GL optimization: batch immutable-bank semi triangles in painter
  * order on the single-pass dual-source path only. Ordinary VRAM, subtractive
  * blending and destination-mask checks retain per-primitive isolation. Call
