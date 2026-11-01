@@ -58,7 +58,12 @@ static uint32_t s_entry_pc;
 static int      s_configured   = 0;
 static int      s_title_blocked;
 static int      s_content_scope_valid = 1;
-static char     s_content_token[71]; /* "_mods_" + complete SHA-256 + NUL */
+/* "_mods_" + the first 16 hex digits (64 bits) of the plan SHA-256 + NUL.
+ * The full 64 digits pushed slot paths past Windows' 260-character MAX_PATH
+ * in ordinary install folders, and fopen then failed every save silently. */
+#define SAVESTATE_SCOPE_HEX 16
+static char     s_content_token[6 + SAVESTATE_SCOPE_HEX + 1];
+static char     s_content_full[65];  /* complete fingerprint, to migrate full-hash names */
 static int      s_save_pending = -1;   /* slot, or -1 */
 static int      s_load_pending = -1;
 int g_psx_savestate_pending = 0;
@@ -401,6 +406,25 @@ void savestate_set_disc_scope(int disc_number) {
         s_disc_token[0] = '\0';
 }
 
+/* States written before the token was shortened carry the full fingerprint.
+ * Rename them to the short name once, so a player's slots stay listed. */
+static void migrate_full_hash_states(void) {
+    static const char* const ext[] = { "pst", "thumb", "hdres" };
+    char from[700], to[700];
+    FILE* f;
+    if (!s_configured || !s_dir[0] || !s_content_full[0]) return;
+    for (int slot = 0; slot < SAVESTATE_SLOTS; ++slot) {
+        for (int e = 0; e < 3; ++e) {
+            snprintf(from, sizeof(from), "%s/state_%08X%s_mods_%s_slot%02d.%s", s_dir,
+                     (unsigned)s_entry_pc, s_disc_token, s_content_full, slot, ext[e]);
+            snprintf(to, sizeof(to), "%s/state_%08X%s%s_slot%02d.%s", s_dir,
+                     (unsigned)s_entry_pc, s_disc_token, s_content_token, slot, ext[e]);
+            if ((f = fopen(to, "rb"))) { fclose(f); continue; }
+            (void)rename(from, to);
+        }
+    }
+}
+
 int savestate_set_content_scope(const char* fingerprint) {
     char token[sizeof(s_content_token)] = {0};
     size_t i;
@@ -410,12 +434,15 @@ int savestate_set_content_scope(const char* fingerprint) {
         for (i = 0; valid && i < 64; ++i)
             if (!((fingerprint[i] >= '0' && fingerprint[i] <= '9') ||
                   (fingerprint[i] >= 'a' && fingerprint[i] <= 'f'))) valid = 0;
-        if (valid) snprintf(token, sizeof(token), "_mods_%s", fingerprint);
+        if (valid) snprintf(token, sizeof(token), "_mods_%.*s", SAVESTATE_SCOPE_HEX, fingerprint);
     }
     if (valid != s_content_scope_valid || strcmp(token, s_content_token))
         cancel_pending_states();
     s_content_scope_valid = valid;
     memcpy(s_content_token, token, sizeof(token));
+    if (valid && token[0]) memcpy(s_content_full, fingerprint, 65);
+    else s_content_full[0] = '\0';
+    migrate_full_hash_states();
     return valid;
 }
 
@@ -488,6 +515,7 @@ void savestate_configure(const char* dir, uint32_t bios_checksum, uint32_t entry
             s_dir[sizeof(s_dir) - 1] = '\0';
         }
         ensure_dir(s_dir);
+        migrate_full_hash_states();
         if (s_disc_token[0]) note_unscoped_legacy_states(s_dir);
     } else {
         /* Netplay guest sandbox / already-scoped path: do not clear the

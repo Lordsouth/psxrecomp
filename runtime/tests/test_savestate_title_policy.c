@@ -134,10 +134,12 @@ int main(void) {
         assert(savestate_set_content_scope(first));
         assert(!savestate_pending() && !s_load_blob && savestate_take_load_failed());
         assert(savestate_slot_path(2, scoped, sizeof(scoped)));
-        assert(strstr(scoped, first) && strcmp(shared, scoped));
+        /* 16 hex digits of the plan, not all 64: the full hash pushed real
+         * install paths past Windows' MAX_PATH and every save failed. */
+        assert(!strcmp(scoped, "saves/openbios/state_80010000_mods_0123456789abcdef_slot02.pst"));
         assert(!strcmp(savestate_root_dir(), "saves") && !strcmp(savestate_dir(), "saves/openbios"));
-        assert(savestate_thumb_path(2, thumb, sizeof(thumb)) && strstr(thumb, first));
-        assert(savestate_hd_path(2, hd, sizeof(hd)) && strstr(hd, first));
+        assert(savestate_thumb_path(2, thumb, sizeof(thumb)) && strstr(thumb, "_mods_0123456789abcdef_slot02.thumb"));
+        assert(savestate_hd_path(2, hd, sizeof(hd)) && strstr(hd, "_mods_0123456789abcdef_slot02.hdres"));
         assert(strstr(thumb, ".thumb") && strstr(hd, ".hdres"));
         assert(!savestate_slot_path(2, tiny, sizeof(tiny)) && !tiny[0]);
         savestate_set_disc_scope(2);
@@ -147,7 +149,7 @@ int main(void) {
         s_save_defer_slot = 3;
         assert(savestate_set_content_scope(second));
         assert(!savestate_pending() && s_save_defer_slot == -1 && savestate_take_save_failed());
-        assert(savestate_slot_path(2, scoped, sizeof(scoped)) && strstr(scoped, second));
+        assert(savestate_slot_path(2, scoped, sizeof(scoped)) && strstr(scoped, "_mods_1123456789abcdef_slot02"));
         assert(!savestate_set_content_scope("../invalid"));
         assert(!savestate_slot_path(2, scoped, sizeof(scoped)) && !scoped[0]);
         assert(!savestate_request_save(2) && !savestate_request_load(2));
