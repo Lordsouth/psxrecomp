@@ -465,6 +465,10 @@ struct ModResolution {
         std::string format;
         std::string sha256;
         std::shared_ptr<const std::vector<uint8_t>> bytes;
+        /* Owned by a host-only feature (ModFeature::host_only): it feeds only
+         * that feature's host plugin (an HD texture pack folder, say), so it
+         * stays out of the fingerprint and needs no verified identity. */
+        bool host_only = false;
     };
     std::vector<Resource> resources;
     struct Diagnostic {

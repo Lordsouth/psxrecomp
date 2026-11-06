@@ -56,6 +56,7 @@ int main(int argc, char** argv) {
         {"psx.enhancement.internal-resolution", {"internal-resolution",
             "psx.internal-resolution", {{"resolution", "default"}}}},
     };
+    bool saw_hd = false;
     for (const auto& entry : fs::recursive_directory_iterator(root)) {
         if (!entry.is_regular_file() || entry.path().filename() != "manifest.toml")
             continue;
@@ -65,6 +66,16 @@ int main(int argc, char** argv) {
         check(ok, entry.path().string() + ": " + error);
         if (!ok) continue;
         parsed++;
+        if (package.id == "psx.enhancement.hd-textures") {
+            /* Presentation only: its pack folder must not make an isolated
+             * mod's save states (or a netplay plan) demand a verified
+             * identity, so the feature and its folder are host-only. */
+            saw_hd = true;
+            check(package.features.size() == 1 && package.features[0].host_only,
+                  "HD Texture Packs is host-only");
+            check(package.plugins.size() == 1 && package.plugins[0].netplay_host_only,
+                  "HD Texture Packs activates a host_only plugin");
+        }
         const fs::path version_dir = entry.path().parent_path();
         check(package.version == version_dir.filename().string(),
               entry.path().string() + ": version does not match its directory");
@@ -132,6 +143,7 @@ int main(int argc, char** argv) {
     }
     check(parsed > 0, "no builtin manifests found under " + root.string());
     check(saw_8mb, "psx.enhancement.8mb-ram builtin package missing");
+    check(saw_hd, "psx.enhancement.hd-textures builtin package missing");
     for (const auto& [id, want] : host_enhancements)
         check(want.seen, id + " builtin package missing");
     if (failures == 0)

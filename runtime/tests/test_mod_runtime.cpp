@@ -2498,6 +2498,15 @@ int main(int argc, char** argv) {
         mod_runtime_activate_plugins();
         check(look_runs == 1 && plain_runs == 1,
               "the host's plan runs beside the guest's own host-only feature");
+        // A host-only option edit mid-match (the in-game Mods page saves the
+        // selection) must not write the host's plan over the guest's own
+        // state.toml: plain stays off offline.
+        check(psx_mod_save_selection() == 1, "saving mid-match reports success");
+        {
+            std::ifstream kept(host_root / "state.toml");
+            check(std::string(std::istreambuf_iterator<char>(kept), {}) == look_only,
+                  "a host plan is never persisted as the guest's own selection");
+        }
         PSXRecompV4::mod_runtime_end_netplay(); test_match_caps = {};
     }
     // The audio timeline skips INDEX00 pregaps and maps into the unchanged

@@ -2765,10 +2765,13 @@ static std::string& session_plan_fp() {
 }
 
 /* resolve() hashes and snapshots declared media before returning it. Only
- * that form has a path-independent identity; loose folders/files do not. */
+ * that form has a path-independent identity; loose folders/files do not.
+ * Host-only resources feed only this machine's presentation and are not part
+ * of the plan's identity, so they need none. */
 static bool netplay_resources_verified(const ModResolution& plan,
                                        std::string* error = nullptr) {
     for (const auto& resource : plan.resources) {
+        if (resource.host_only) continue;
         if (resource.bytes && resource.sha256.size() == 64) continue;
         if (error) *error = resource.package_id + "/" + resource.feature_id +
             ": netplay requires a verified size and SHA-256 for resource " +
@@ -4018,6 +4021,11 @@ extern "C" int psx_mod_save_selection(void) {
     using namespace PSXRecompV4;
     RuntimeMods& s = state();
     if (!s.initialized) return 0;
+    /* A match that applied the host's plan holds it in s.manager until
+     * mod_runtime_end_netplay restores the player's own: never persist it.
+     * ponytail: a host-only option edit mid-match lasts for the match only;
+     * mirror it into offline_manager_before_netplay if players want it kept. */
+    if (offline_manager_before_netplay) return 1;
     std::string error;
     if (!s.manager.save_state(&error)) {
         std::fprintf(stderr, "psxrecomp: mods: could not save state.toml: %s\n", error.c_str());

@@ -2695,6 +2695,42 @@ int main() {
         check(host.set_feature_option("look.mod", "look", "tone", "b", &error), error.c_str());
         check(host.resolve("SLUS-TEST").fingerprint == base.fingerprint,
               "a host-only feature's options must not change the plan fingerprint");
+        /* A host-only feature may declare a resource (an HD texture pack
+         * folder): it feeds only the host plugin, so it is resolved and
+         * flagged but never enters the fingerprint, whatever folder is
+         * chosen. Isolated save states and netplay checks need no identity
+         * for it (mod_runtime netplay_resources_verified). */
+        write_text(folder / "packages/pack.mod/1.0.0/manifest.toml",
+            head("pack.mod", 11) +
+            "[[feature]]\nid = \"pack\"\nname = \"Pack\"\n"
+            "[[resource]]\nfeature = \"pack\"\nid = \"dir\"\nlabel = \"Dir\"\n"
+            "format = \"directory\"\nrequired = true\n"
+            "[[plugin]]\nfeature = \"pack\"\nid = \"test.look\"\nnetplay = \"host_only\"\n");
+        fs::create_directories(folder / "pack-a", ec);
+        fs::create_directories(folder / "pack-b", ec);
+        ModPackageManager packs(folder);
+        check(packs.scan(&error) && packs.scan_errors().empty(),
+              "a host-only feature may declare a resource");
+        check(packs.load_state(&error), error.c_str());
+        check(packs.packages().at("pack.mod").at("1.0.0").features[0].host_only,
+              "a host-only feature with a resource stays host-only");
+        check(packs.set_feature_enabled("sim.mod", "sim", true, &error), error.c_str());
+        const ModResolution pack_base = packs.resolve("SLUS-TEST");
+        check(packs.set_feature_enabled("pack.mod", "pack", true, &error), error.c_str());
+        check(packs.set_feature_resource_path("pack.mod", "pack", "dir", folder / "pack-a", &error),
+              error.c_str());
+        const ModResolution pack_a = packs.resolve("SLUS-TEST");
+        check(pack_a.ok && pack_a.resources.size() == 1 && pack_a.resources[0].host_only &&
+                  !pack_a.resources[0].bytes,
+              "the host-only resource resolves as an unhashed, host-only folder");
+        check(pack_a.fingerprint == pack_base.fingerprint,
+              "a host-only resource must not change the plan fingerprint");
+        check(packs.set_feature_resource_path("pack.mod", "pack", "dir", folder / "pack-b", &error),
+              error.c_str());
+        check(packs.resolve("SLUS-TEST").fingerprint == pack_base.fingerprint,
+              "choosing another host-only folder must not change the plan fingerprint");
+        fs::remove_all(folder / "packages/pack.mod", ec);
+
         check(host.set_feature_enabled("sim.mod", "sim", false, &error), error.c_str());
         check(host.resolve("SLUS-TEST").fingerprint != base.fingerprint,
               "an ordinary plugin feature still changes the fingerprint");

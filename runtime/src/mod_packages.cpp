@@ -794,6 +794,7 @@ std::string canonical_resolution(const std::vector<const ModPackage*>& ordered,
             << plugin.feature_id << '\n';
     }
     for (const ModResolution::Resource& resource : resources) {
+        if (resource.host_only) continue;
         out << "resource:" << resource.package_id << ':' << resource.feature_id
             << ':' << resource.id << '=';
         if (resource.bytes)
@@ -2855,8 +2856,10 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
         /* A feature with a host_only plugin promises it never touches guest
          * execution: everything it contributes is such a plugin. That promise
          * is what lets it stay the player's own in netplay and leave the plan
-         * fingerprint, so a feature that also patches, overlays, prepares a
-         * resource or requires another feature cannot make it. */
+         * fingerprint, so a feature that also patches, overlays, ships a disc
+         * delta or requires another feature cannot make it. It may declare
+         * resources: they feed only its host plugin (an HD texture pack
+         * folder), so they leave the fingerprint with it. */
         for (ModFeature& feature : out.features) {
             bool host_only = false, other_plugin = false;
             for (const ModPlugin& plugin : out.plugins) {
@@ -2869,11 +2872,10 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                     [&](const auto& item) { return item.feature_id == feature.id; });
             };
             if (other_plugin || owns(out.patches) || owns(out.overlays) ||
-                owns(out.resources) || owns(out.requirements) ||
-                owns(out.disc_deltas))
+                owns(out.requirements) || owns(out.disc_deltas))
                 throw std::runtime_error(
                     "feature " + feature.id + ": a netplay = \"host_only\" plugin's "
-                    "feature may contribute nothing but host_only plugins");
+                    "feature may contribute nothing but host_only plugins and resources");
             feature.host_only = true;
         }
         return true;
@@ -4438,6 +4440,7 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
             resolved.path = path;
             resolved.format = resource.format;
             resolved.sha256 = resource.sha256;
+            resolved.host_only = feature->host_only;
             if (!resource.sha256.empty()) {
                 std::string media_error;
                 if (!load_resource(resource, resolved.bytes, media_error)) {

@@ -1323,8 +1323,12 @@ netplay = "host_only"
 A host-only plugin never touches guest execution: it sets host presentation,
 audio output or host-tool state from its activation (and option-changed)
 callbacks only. Its feature may contribute nothing else -- no other plugin,
-patch, overlay, resource or `[[requirement]]` -- or the manifest is rejected;
-such a feature is host-only (`ModFeature::host_only`). Then:
+patch, overlay, disc delta or `[[requirement]]` -- or the manifest is rejected;
+such a feature is host-only (`ModFeature::host_only`). It may declare
+`[[resource]]`s, which feed only its host plugin (HD Texture Packs' pack
+folder): they resolve flagged `host_only`, stay out of the fingerprint and need
+no verified size/SHA-256, so a loose folder never blocks an isolated package's
+save states or a netplay plan. Then:
 
 - **The plan fingerprint leaves it out.** `canonical_resolution` skips
   host-only features, their options and their plugins, and a package made of
