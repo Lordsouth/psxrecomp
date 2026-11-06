@@ -89,6 +89,10 @@ const std::string& mod_runtime_fingerprint();
 /* Empty scope preserves existing slots. Isolated packages require a committed,
  * verified content plan; resource preparation/preview alone establishes none. */
 bool mod_runtime_savestate_scope(std::string& scope, std::string* error = nullptr);
+/* The card subfolder (psx_mod_register_memcard_subdir) an enabled feature of
+ * the CURRENT selection asks for, "" when none: the launcher's card panel
+ * inspects the cards the next boot will mount. */
+std::string mod_runtime_selection_memcard_subdir();
 /* Host diagnostics may copy the persisted offline selection from this root. */
 const std::filesystem::path& mod_runtime_root();
 const std::filesystem::path& mod_runtime_effective_disc_path();

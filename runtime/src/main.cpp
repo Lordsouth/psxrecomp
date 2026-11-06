@@ -11643,6 +11643,14 @@ namespace {
 
     int ae_memcard_inspect(const char* card_path, RecompLauncherCMemcard* out) {
         if (!card_path || !card_path[0] || !out) return 0;
+        /* A ticked feature that keeps its own cards (Digimon World 1.5's
+         * saves/dw15/) boots with those, so show those. */
+        char mod_path[1024];
+        const std::string subdir = PSXRecompV4::mod_runtime_selection_memcard_subdir();
+        if (!subdir.empty()) {
+            memcard_path_in_subdir(mod_path, sizeof(mod_path), card_path, subdir.c_str());
+            card_path = mod_path;
+        }
         MemcardSummary s;
         if (memcard_summary_path(card_path, &s) != 0) return 0;
         out->valid       = s.valid;

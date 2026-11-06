@@ -261,7 +261,7 @@ void memcard_clear_mod_subdir(void) { s_mod_subdir[0] = '\0'; }
 
 const char* memcard_mod_subdir(void) { return s_mod_subdir; }
 
-int psx_mod_set_memcard_subdir(const char* name) {
+int memcard_subdir_name_valid(const char* name) {
     size_t i;
     if (!name || !name[0] || strlen(name) >= sizeof(s_mod_subdir)) return 0;
     for (i = 0; name[i]; i++) {
@@ -270,21 +270,25 @@ int psx_mod_set_memcard_subdir(const char* name) {
               (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'))
             return 0;
     }
-    if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) return 0;
+    return strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
+}
+
+int psx_mod_set_memcard_subdir(const char* name) {
+    if (!memcard_subdir_name_valid(name)) return 0;
     snprintf(s_mod_subdir, sizeof(s_mod_subdir), "%s", name);
     return 1;
 }
 
-/* <parent of path>/<subdir>/<file name of path>. */
-static void memcard_subdir_path(char* out, size_t n, const char* path) {
+void memcard_path_in_subdir(char* out, size_t n, const char* path,
+                            const char* subdir) {
     const char* slash = strrchr(path, '/');
     const char* bslash = strrchr(path, '\\');
     if (bslash && (!slash || bslash > slash)) slash = bslash;
     if (slash)
         snprintf(out, n, "%.*s/%s/%s", (int)(slash - path), path,
-                 s_mod_subdir, slash + 1);
+                 subdir, slash + 1);
     else
-        snprintf(out, n, "%s/%s", s_mod_subdir, path);
+        snprintf(out, n, "%s/%s", subdir, path);
 }
 
 void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]) {
@@ -303,8 +307,8 @@ void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]) {
             modslots[i].enabled = slots ? slots[i].enabled : 1;
             modslots[i].path = NULL;
             if (slots && slots[i].path && slots[i].path[0]) {
-                memcard_subdir_path(modpath[i], sizeof(modpath[i]),
-                                    slots[i].path);
+                memcard_path_in_subdir(modpath[i], sizeof(modpath[i]),
+                                       slots[i].path, s_mod_subdir);
                 char parent[512];
                 char* cut;
                 snprintf(parent, sizeof(parent), "%s", modpath[i]);

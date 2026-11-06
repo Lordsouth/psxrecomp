@@ -2,6 +2,7 @@
 #include "host_launch_timing.h"
 
 #include "crc32.h"
+#include "memcard.h"
 #include "mod_plugins.h"
 #include "mod_media.h"
 #include "psx_sha256.h"
@@ -55,6 +56,8 @@ struct RegisteredPlugin {
      * itself lives in mod_runtime's pending list) — participates in
      * availability so a manifest can gate an override-only plugin. */
     bool function_override = false;
+    /* psx_mod_register_memcard_subdir: the plugin's cards live here. */
+    std::string memcard_subdir;
 };
 
 std::map<std::string, RegisteredPlugin>& registered_plugins() {
@@ -1593,7 +1596,23 @@ bool mod_plugin_registered(const std::string& id) {
         (found->second.activation || found->second.session_reset || found->second.vblank ||
          found->second.savestate || found->second.pcm ||
          !found->second.function_entries.empty() || !found->second.guest_functions.empty() ||
-         !found->second.instructions.empty() || found->second.function_override);
+         !found->second.instructions.empty() || found->second.function_override ||
+         !found->second.memcard_subdir.empty());
+}
+
+bool mod_register_memcard_subdir_plugin(const std::string& id,
+                                        const std::string& subdir) {
+    if (!valid_id(id) || !memcard_subdir_name_valid(subdir.c_str())) return false;
+    RegisteredPlugin& plugin = registered_plugins()[id];
+    if (!plugin.memcard_subdir.empty()) return false;
+    plugin.memcard_subdir = subdir;
+    return true;
+}
+
+std::string mod_plugin_memcard_subdir(const std::string& id) {
+    const auto found = registered_plugins().find(id);
+    return found == registered_plugins().end() ? std::string()
+                                               : found->second.memcard_subdir;
 }
 
 bool mod_register_guest_function_plugin(const std::string& id, uint32_t address,
@@ -1664,8 +1683,10 @@ void mod_invoke_savestate_plugin(const std::string& id) {
 
 void mod_invoke_activation_plugin(const std::string& id) {
     const auto found = registered_plugins().find(id);
-    if (found != registered_plugins().end() && found->second.activation)
-        found->second.activation();
+    if (found == registered_plugins().end()) return;
+    if (!found->second.memcard_subdir.empty())
+        (void)psx_mod_set_memcard_subdir(found->second.memcard_subdir.c_str());
+    if (found->second.activation) found->second.activation();
 }
 
 void mod_invoke_vblank_plugin(const std::string& id) {
@@ -4652,6 +4673,11 @@ extern "C" int psx_mod_register_activation_plugin(
     const char* id, PSXModActivationCallback callback) {
     return id &&
         PSXRecompV4::mod_register_activation_plugin(id, callback) ? 1 : 0;
+}
+
+extern "C" int psx_mod_register_memcard_subdir(const char* id, const char* subdir) {
+    return id && subdir &&
+        PSXRecompV4::mod_register_memcard_subdir_plugin(id, subdir) ? 1 : 0;
 }
 
 extern "C" int psx_mod_register_session_reset_plugin(

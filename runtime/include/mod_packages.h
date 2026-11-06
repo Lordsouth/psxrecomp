@@ -692,6 +692,9 @@ bool mod_register_function_filter_plugin(const std::string& id, uint32_t address
 bool mod_register_guest_function_plugin(const std::string& id, uint32_t address,
                                         PSXModFunctionEntryCallback callback);
 bool mod_plugin_registered(const std::string& id);
+bool mod_register_memcard_subdir_plugin(const std::string& id, const std::string& subdir);
+/* psx_mod_register_memcard_subdir's folder for this plugin id; "" when none. */
+std::string mod_plugin_memcard_subdir(const std::string& id);
 bool mod_register_function_override_marker(const std::string& id);
 void mod_invoke_activation_plugin(const std::string& id);
 void mod_invoke_vblank_plugin(const std::string& id);

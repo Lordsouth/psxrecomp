@@ -712,8 +712,21 @@ int psx_mod_append_cdda_tracks(const PSXModCDDATrack* tracks, uint32_t count,
  * to the next card init and is then cleared, so it holds only while the
  * feature stays enabled. name: 1-63 chars of [A-Za-z0-9_.-]. Returns 1 on
  * success, 0 for an invalid name. Implemented in memcard.c.
+ * Prefer psx_mod_register_memcard_subdir: the launcher cannot see a request
+ * made from inside an activation callback.
  */
 int psx_mod_set_memcard_subdir(const char* name);
+
+/*
+ * Register plugin `id` as one whose feature keeps the memory cards in
+ * <memcard_dir>/<subdir>/ (same placement as psx_mod_set_memcard_subdir).
+ * Declared statically, so the launcher's card panel shows the cards the next
+ * boot will use as soon as the feature is ticked; activation applies it
+ * whenever the plugin is in the plan. Call from a PSX_MOD_CONSTRUCTOR; a
+ * manifest selects it with a [[plugin]] block like any other id. Returns 1
+ * on success, 0 for an invalid or already-registered id or subdir.
+ */
+int psx_mod_register_memcard_subdir(const char* id, const char* subdir);
 
 /*
  * Request a fixed host display aspect before renderer/window initialization.

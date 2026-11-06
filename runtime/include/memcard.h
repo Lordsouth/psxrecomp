@@ -56,6 +56,13 @@ void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]);
  * Clear before each mod activation pass; "" when none is requested. */
 void        memcard_clear_mod_subdir(void);
 const char* memcard_mod_subdir(void);
+/* 1 when `name` is a usable card subfolder: 1-63 chars of [A-Za-z0-9_.-],
+ * not "." or "..". */
+int         memcard_subdir_name_valid(const char* name);
+/* <parent of path>/<subdir>/<file name of path>: where a card lives while a
+ * mod's subfolder is active (memcard_init_slots, the launcher preview). */
+void        memcard_path_in_subdir(char* out, size_t n, const char* path,
+                                   const char* subdir);
 
 /* Stateless on-disk introspection (used by the launcher before boot). Parses a
  * .mcd file's directory frames without touching the live card array. */

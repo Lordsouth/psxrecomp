@@ -3285,6 +3285,25 @@ extern "C" const char *mod_runtime_fingerprint_c(void) {
     return mod_runtime_fingerprint().c_str();
 }
 
+// ponytail: ignores [[plugin]] `when` conditions; no subdir plugin uses one.
+std::string mod_runtime_selection_memcard_subdir() {
+    RuntimeMods& s = state();
+    if (!s.initialized) return {};
+    for (const auto& [id, versions] : s.manager.packages()) {
+        (void)versions;
+        const ModPackage* package = s.manager.selected_package(id);
+        if (!package) continue;
+        for (const ModPlugin& plugin : package->plugins) {
+            std::string subdir = mod_plugin_memcard_subdir(plugin.id);
+            if (!subdir.empty() &&
+                (s.manager.feature_enabled(id, plugin.feature_id) ||
+                 s.manager.feature_implicitly_enabled(id, plugin.feature_id)))
+                return subdir;
+        }
+    }
+    return {};
+}
+
 bool mod_runtime_savestate_scope(std::string& scope, std::string* error) {
     scope.clear();
     if (error) error->clear();
@@ -3333,13 +3352,18 @@ const RecompLauncherCModProvider* mod_runtime_launcher_provider() {
 #if defined(RECOMP_LAUNCHER_HAS_QUICK_MODS)
     provider.feature_set_quick = provider_feature_set_quick;
 #endif
+#if defined(RECOMP_LAUNCHER_HAS_PREPARED_MOD_COMMIT)
+    /* Read-only selection generation. Also wired without the worker: the
+     * card panel re-inspects on a change (a mod may move the cards), and
+     * preparation still needs commit_worker_safe + try_commit. */
+    provider.preparation_revision = [](void*) -> unsigned long long { return state().preparation_revision; };
+#endif
 #if defined(RECOMP_LAUNCHER_HAS_WORKER_MOD_COMMIT) && defined(PSX_LAUNCHER_MOD_COMMIT_WORKER_SAFE)
     provider.commit_worker_safe = 1;
 #if defined(RECOMP_LAUNCHER_HAS_PREPARED_MOD_COMMIT)
     provider.try_commit = [](void*, const char* path) -> int {
         return prepared_ticket_matches(path ? std::filesystem::path(path) : std::filesystem::path()) ? 1 : 0;
     };
-    provider.preparation_revision = [](void*) -> unsigned long long { return state().preparation_revision; };
 #endif
 #if defined(RECOMP_LAUNCHER_HAS_MOD_PREPARATION_PROGRESS)
     provider.commit_with_progress = [](void*, const char* path,
