@@ -251,33 +251,8 @@ static void memcard_ensure_dir(const char* dir) {
 #endif
 }
 
-/* Card subfolder requested by a mod activation callback (mod_plugins.h), for
- * a mod whose saves must not mix with the stock game's. main.cpp clears it
- * before every activation pass, so a session with the mod off starts clean,
- * and it survives a rematch that re-inits cards without re-activating. */
-static char s_mod_subdir[64];
-
-void memcard_clear_mod_subdir(void) { s_mod_subdir[0] = '\0'; }
-
-const char* memcard_mod_subdir(void) { return s_mod_subdir; }
-
-int memcard_subdir_name_valid(const char* name) {
-    size_t i;
-    if (!name || !name[0] || strlen(name) >= sizeof(s_mod_subdir)) return 0;
-    for (i = 0; name[i]; i++) {
-        const char c = name[i];
-        if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-              (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.'))
-            return 0;
-    }
-    return strcmp(name, ".") != 0 && strcmp(name, "..") != 0;
-}
-
-int psx_mod_set_memcard_subdir(const char* name) {
-    if (!memcard_subdir_name_valid(name)) return 0;
-    snprintf(s_mod_subdir, sizeof(s_mod_subdir), "%s", name);
-    return 1;
-}
+/* The mod card subfolder selection and its name check live in
+ * memcard_subdir.c. */
 
 void memcard_path_in_subdir(char* out, size_t n, const char* path,
                             const char* subdir) {
@@ -297,10 +272,11 @@ void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]) {
     MemcardSlotConfig modslots[2];
     for (int i = 0; i < MAX_CARDS; ++i) discard_extension(&cards[i]);
     memset(cards, 0, sizeof(cards));
-    if (s_mod_subdir[0]) {
+    const char* mod_subdir = memcard_mod_subdir();
+    if (mod_subdir[0]) {
         int i;
         if (dir) {
-            snprintf(moddir, sizeof(moddir), "%s/%s", dir, s_mod_subdir);
+            snprintf(moddir, sizeof(moddir), "%s/%s", dir, mod_subdir);
             dir = moddir;
         }
         for (i = 0; i < MAX_CARDS; i++) {
@@ -308,7 +284,7 @@ void memcard_init_slots(const char* dir, const MemcardSlotConfig slots[2]) {
             modslots[i].path = NULL;
             if (slots && slots[i].path && slots[i].path[0]) {
                 memcard_path_in_subdir(modpath[i], sizeof(modpath[i]),
-                                       slots[i].path, s_mod_subdir);
+                                       slots[i].path, mod_subdir);
                 char parent[512];
                 char* cut;
                 snprintf(parent, sizeof(parent), "%s", modpath[i]);

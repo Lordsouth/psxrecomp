@@ -992,7 +992,7 @@ if(BUILD_TESTING)
             src/pgxp_session.cpp src/mod_builtin_pgxp.c src/pgxp.cpp
             src/psx_ram_geometry.c
             src/mod_runtime.cpp src/mod_function_replacements.c
-            src/mod_packages.cpp
+            src/mod_packages.cpp src/memcard_subdir.c
             src/mod_media.cpp
             src/disc_path.cpp
             src/cue_sheet.cpp
@@ -1429,7 +1429,7 @@ if(BUILD_TESTING)
 
     add_executable(mod_packages_test
         tests/test_mod_packages.cpp
-        src/mod_packages.cpp
+        src/mod_packages.cpp src/memcard_subdir.c
         src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c)
@@ -1442,7 +1442,7 @@ if(BUILD_TESTING)
 
     add_executable(builtin_mod_manifests_test
         tests/test_builtin_mod_manifests.cpp
-        src/mod_packages.cpp
+        src/mod_packages.cpp src/memcard_subdir.c
         src/mod_media.cpp src/iso_reader.cpp src/cue_sheet.cpp
         src/crc32.c
         src/psx_sha256.c
@@ -1489,7 +1489,7 @@ if(BUILD_TESTING)
         src/host_span_ring.c
         src/mod_runtime.cpp src/mod_function_replacements.c
         src/mod_netplay.c
-        src/mod_packages.cpp
+        src/mod_packages.cpp src/memcard_subdir.c
         src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
@@ -1539,7 +1539,7 @@ if(BUILD_TESTING)
         src/host_span_ring.c
         src/mod_runtime.cpp src/mod_function_replacements.c
         src/mod_netplay.c
-        src/mod_packages.cpp
+        src/mod_packages.cpp src/memcard_subdir.c
         src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
@@ -1586,7 +1586,7 @@ if(BUILD_TESTING)
         src/mod_resident.cpp
         src/mod_runtime.cpp src/mod_function_replacements.c
         src/mod_netplay.c
-        src/mod_packages.cpp
+        src/mod_packages.cpp src/memcard_subdir.c
         src/mod_media.cpp
         src/disc_path.cpp
         src/cue_sheet.cpp
@@ -1713,7 +1713,7 @@ if(BUILD_TESTING)
     add_executable(sio_spu_istat_ownership_test
         tests/test_sio_spu_istat_ownership.c
         src/sio.c
-        src/memcard.c)
+        src/memcard.c src/memcard_subdir.c)
     target_include_directories(sio_spu_istat_ownership_test PRIVATE include src)
     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/sio_spu_istat_scratch)
     add_test(NAME sio_spu_istat_ownership_test COMMAND sio_spu_istat_ownership_test
@@ -1821,7 +1821,7 @@ if(BUILD_TESTING)
     add_test(NAME host_enhancements_test COMMAND host_enhancements_test)
 
     add_executable(memcard_extensions_test
-        tests/test_memcard_extensions.c src/memcard.c)
+        tests/test_memcard_extensions.c src/memcard.c src/memcard_subdir.c)
     target_include_directories(memcard_extensions_test PRIVATE include)
     file(MAKE_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}/memcard_extensions_scratch)
     add_test(NAME memcard_extensions_test COMMAND memcard_extensions_test
@@ -2355,7 +2355,7 @@ if(BUILD_TESTING)
     add_executable(sio_card_protocol_test
         tests/test_sio_card_protocol.c
         src/sio.c
-        src/memcard.c)
+        src/memcard.c src/memcard_subdir.c)
     target_include_directories(sio_card_protocol_test PRIVATE include src)
     # Runs in a build-tree scratch dir, NOT in tests/: the test writes
     # test_dir/card1.mcd relative to the working directory (self-provisioning it

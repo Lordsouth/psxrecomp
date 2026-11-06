@@ -711,7 +711,7 @@ int psx_mod_append_cdda_tracks(const PSXModCDDATrack* tracks, uint32_t count,
  * it). For a mod whose saves the stock game cannot read. The request applies
  * to the next card init and is then cleared, so it holds only while the
  * feature stays enabled. name: 1-63 chars of [A-Za-z0-9_.-]. Returns 1 on
- * success, 0 for an invalid name. Implemented in memcard.c.
+ * success, 0 for an invalid name. Implemented in memcard_subdir.c.
  * Prefer psx_mod_register_memcard_subdir: the launcher cannot see a request
  * made from inside an activation callback.
  */

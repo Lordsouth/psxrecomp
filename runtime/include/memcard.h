@@ -1,6 +1,7 @@
 ﻿#ifndef PSXRECOMP_MEMCARD_H
 #define PSXRECOMP_MEMCARD_H
 
+#include <stddef.h>
 #include <stdint.h>
 
 #ifdef __cplusplus

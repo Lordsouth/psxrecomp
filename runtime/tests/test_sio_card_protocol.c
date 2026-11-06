@@ -25,7 +25,7 @@
  *
  * Build:
  *   cc -I../include -o test_sio_card_protocol \
- *       test_sio_card_protocol.c ../src/sio.c ../src/memcard.c
+ *       test_sio_card_protocol.c ../src/sio.c ../src/memcard.c ../src/memcard_subdir.c
  */
 
 #include "sio.h"
