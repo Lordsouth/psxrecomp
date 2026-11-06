@@ -8421,13 +8421,26 @@ extern int sio_get_pad_mode_locked(int slot);
  * and the snapshots held, so scripted runs can check capture and opening. */
 static void handle_rewind_status(int id, const char *json)
 {
+    PsxRewindDebugInfo di;
     (void)json;
+    psx_rewind_debug_info(&di);
     send_fmt("{\"id\":%d,\"ok\":true,\"enabled\":%s,\"open\":%s,"
-             "\"title_blocked\":%s,\"snaps\":%u}\n",
+             "\"title_blocked\":%s,\"snaps\":%u,\"frame\":%u,\"sel\":%u,"
+             "\"sel_tick\":%u,\"newest_tick\":%u,\"interval\":%u,\"depth\":%u,"
+             "\"loads\":%u,\"load_fails\":%u,\"bytes\":%llu,\"captures\":%u,"
+             "\"capture_us_last\":%llu,\"capture_us_max\":%llu,"
+             "\"capture_us_total\":%llu}\n",
              id, psx_rewind_enabled() ? "true" : "false",
              psx_rewind_is_open() ? "true" : "false",
              psx_rewind_title_blocked() ? "true" : "false",
-             (unsigned)psx_rewind_snap_count());
+             (unsigned)psx_rewind_snap_count(), (unsigned)di.frame,
+             (unsigned)di.sel, (unsigned)di.sel_tick,
+             (unsigned)di.newest_tick, (unsigned)di.interval,
+             (unsigned)di.depth, (unsigned)di.loads, (unsigned)di.load_fails,
+             (unsigned long long)di.bytes, (unsigned)di.captures,
+             (unsigned long long)di.capture_us_last,
+             (unsigned long long)di.capture_us_max,
+             (unsigned long long)di.capture_us_total);
 }
 
 static void handle_pad_status(int id, const char *json)

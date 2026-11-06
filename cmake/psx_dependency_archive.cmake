@@ -115,7 +115,9 @@ function(psxrecomp_dependency_archive name)
     endif()
 
     string(TOUPPER "${name}" _uc_name)
-    if(PSX_DEPS_OFFLINE)
+    # A pre-extracted SOURCE_DIR means FetchContent never touches the URL, so
+    # offline mode has nothing to refuse.
+    if(PSX_DEPS_OFFLINE AND NOT _psx_dep_SILENT)
         message(FATAL_ERROR
             "psxrecomp: PSX_DEPS_OFFLINE is ON but ${name} is not vendored.\n"
             "  expected archive: ${_vendored}\n"

@@ -7,6 +7,7 @@
 #include "gpu.h"
 #include "host_keymap.h"
 #include "host_osd.h"
+#include "host_span_ring.h"
 #include "interrupts.h"
 #include "mdec.h"
 #include "psx_cycles.h"
@@ -113,6 +114,10 @@ int psx_rewind_title_blocked(void)
 
 void psx_rewind_set_title_blocked(int blocked) { s_title_blocked = blocked ? 1 : 0; }
 uint32_t psx_rewind_snap_count(void) { return 0; }
+void psx_rewind_debug_info(PsxRewindDebugInfo *out)
+{
+    if (out) memset(out, 0, sizeof *out);
+}
 void psx_rewind_set_depth(uint32_t depth) { (void)depth; }
 void psx_rewind_set_interval(uint32_t interval) { (void)interval; }
 void psx_rewind_set_enabled(int enabled) { (void)enabled; }
@@ -188,6 +193,8 @@ static int s_panel_dirty = 1;
 
 static int s_load_pending;
 static uint32_t s_load_tick;
+static uint32_t s_loads, s_load_fails, s_captures;
+static uint64_t s_cap_us_last, s_cap_us_max, s_cap_us_total;
 
 static int s_left_was, s_right_was, s_acc_was, s_can_was;
 static uint32_t s_rep_next;
@@ -492,6 +499,33 @@ uint32_t psx_rewind_snap_count(void)
     return s_count;
 }
 
+void psx_rewind_debug_info(PsxRewindDebugInfo *out)
+{
+    uint32_t i;
+    if (!out)
+        return;
+    memset(out, 0, sizeof *out);
+    out->frame = s_frame;
+    out->interval = s_interval;
+    out->depth = s_depth;
+    out->loads = s_loads;
+    out->load_fails = s_load_fails;
+    out->captures = s_captures;
+    out->capture_us_last = s_cap_us_last;
+    out->capture_us_max = s_cap_us_max;
+    out->capture_us_total = s_cap_us_total;
+    if (!s_count || !s_ring)
+        return;
+    out->sel = (uint32_t)s_sel;
+    out->sel_tick = s_ticks[s_sel];
+    out->newest_tick = s_ticks[s_count - 1u];
+    for (i = 0; i < s_count; i++) {
+        size_t size = 0;
+        if (rbe_snap_ring_peek(s_ring, s_ticks[i], &size))
+            out->bytes += size;
+    }
+}
+
 int psx_rewind_needs_present(void)
 {
     return s_open || s_slide > 0.01f || s_anim_dir != 0;
@@ -580,11 +614,25 @@ void psx_rewind_poll(CPUState *cpu, uint32_t resume_pc)
         s_load_pending = 0;
         s_open = 0;
         s_anim_dir = -1;
-        (void)do_load(cpu, tick);
+        /* do_load does not return on success (scheduler resume), so count
+         * the attempt first and take it back if it comes back refused. */
+        s_loads++;
+        if (!do_load(cpu, tick)) {
+            s_loads--;
+            s_load_fails++;
+        }
         return;
     }
-    if (s_capture_due && !s_open && !psx_netplay_active() && !s_title_blocked)
-        (void)do_capture(cpu, resume_pc);
+    if (s_capture_due && !s_open && !psx_netplay_active() && !s_title_blocked) {
+        const uint64_t t0 = host_clock_us();
+        if (do_capture(cpu, resume_pc)) {
+            s_cap_us_last = host_clock_us() - t0;
+            if (s_cap_us_last > s_cap_us_max)
+                s_cap_us_max = s_cap_us_last;
+            s_cap_us_total += s_cap_us_last;
+            s_captures++;
+        }
+    }
 }
 
 int psx_rewind_toggle(void)
@@ -593,7 +641,7 @@ int psx_rewind_toggle(void)
         /* Rewind is off by default, so this is now the common case: say why
          * rather than leaving F8 / Select+R3 looking broken. Silent only when
          * the feature was compiled out, where there is nothing to turn on. */
-        host_osd_push("Rewind is off — enable it in Settings", 1800);
+        host_osd_push("Rewind is off — turn it on in Mods", 1800);
         return 0;
     }
     if (psx_netplay_active()) {

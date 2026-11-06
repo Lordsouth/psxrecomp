@@ -6505,6 +6505,16 @@ static int any_controller_button_down(void) {
 }
 
 static int savestate_resume_inputs_held(void) {
+#ifndef PSX_NO_DEBUG_TOOLS
+    /* The debug host-pad layer is a virtual P1 gamepad: a button held on it
+     * holds the guard exactly as one held on a physical controller does. */
+    {
+        uint16_t word = 0xFFFFu;
+        uint8_t st[4], lt = 0, rt = 0;
+        if (debug_server_get_host_pad(&word, st, &lt, &rt) && word != 0xFFFFu)
+            return 1;
+    }
+#endif
     const Uint8* keys = SDL_GetKeyboardState(NULL);
     if (keys) {
         if (keys[SDL_SCANCODE_RETURN] || keys[SDL_SCANCODE_KP_ENTER] ||
@@ -8432,7 +8442,12 @@ static int rewind_toggle_buttons_down(void) {
 static void rewind_poll_toggle_buttons(void) {
     static int was_down;
     int down = rewind_toggle_buttons_down();
-    if (down && !was_down && !psx_rewind_is_open()) {
+    /* Select or R3 alone closes the filmstrip, so the chord that closed it is
+     * often still (or only now fully) held at the next vblank. The post-close
+     * input guard swallows that edge instead of reopening the strip; was_down
+     * keeps tracking, so the chord must be released and pressed again. */
+    if (down && !was_down && !psx_rewind_is_open() &&
+        !savestate_input_guard_active()) {
         psx_local_mouse_reset();
         psx_rewind_toggle();
     }

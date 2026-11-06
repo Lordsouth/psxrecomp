@@ -51,6 +51,15 @@ void psx_rewind_set_title_blocked(int blocked);
 int  psx_rewind_title_blocked(void);
 /* Snapshots in the ring (debug/status). */
 uint32_t psx_rewind_snap_count(void);
+/* Debug server rewind_status: rewind frame counter, selected index and tick,
+ * newest tick, bytes held by the ring, completed and refused loads, and the
+ * host time spent capturing (the per-snapshot hitch). */
+typedef struct PsxRewindDebugInfo {
+    uint32_t frame, sel, sel_tick, newest_tick, interval, depth;
+    uint32_t loads, load_fails, captures;
+    uint64_t bytes, capture_us_last, capture_us_max, capture_us_total;
+} PsxRewindDebugInfo;
+void psx_rewind_debug_info(PsxRewindDebugInfo *out);
 int  psx_rewind_is_open(void);
 /* 1 while open or slide animation still visible. */
 int  psx_rewind_needs_present(void);
