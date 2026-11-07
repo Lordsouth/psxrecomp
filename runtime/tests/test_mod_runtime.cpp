@@ -172,10 +172,6 @@ static void test_hd_activation(void) {
 extern "C" void psx_projection_reset_session(void) {}
 extern "C" void gpu_ws_set_native_scene_predicate(int (*)(void)) {}
 extern "C" int psx_ws_x_margin(void) { return 0; }
-extern "C" int ws_nw_extra(void) { return 0; }
-extern "C" int gpu_mod_vram_write(uint32_t, uint32_t, uint32_t, uint32_t,
-                                  const uint16_t*) { return 0; }
-extern "C" int psx_cheats_set_enabled(const char*, int) { return 0; }
 
 /* Stand-in for the GPU's display geometry. psx_mod_display_width/height must
  * report exactly what the presenter reports -- a plugin drawing an overlay

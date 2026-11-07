@@ -85,9 +85,6 @@ extern "C" uint32_t psx_mod_memory_alloc(uint32_t size, uint32_t alignment);
 extern "C" uint32_t psx_mod_gpu_dma_memory_alloc(uint32_t size,
                                                   uint32_t alignment);
 extern "C" int psx_ws_x_margin(void);
-extern "C" int ws_nw_extra(void);
-extern "C" int gpu_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h, const uint16_t* pixels);
-extern "C" int psx_cheats_set_enabled(const char* name, int enabled);
 extern "C" void gpu_ws_tag_hud_primitive(uint32_t primitive, int edge);
 extern "C" void gpu_ws_tag_world_primitive(uint32_t primitive, int is_world);
 extern "C" void gpu_ws_set_adaptive_backdrop_preload(int enabled);
@@ -4403,22 +4400,6 @@ extern "C" uint32_t psx_mod_display_height(void) {
     std::memset(&info, 0, sizeof(info));
     gpu_get_display_info(&info);
     return info.height;
-}
-
-extern "C" int32_t psx_mod_ws_native_wide_offset(void) {
-    /* ws_nw_extra() is 2 * ws_nw_offset(), and ws_nw_offset() is already 0
-     * unless native-wide is ACTIVE (which folds in !gpu_ws_present_native_43),
-     * so this is exactly the reveal the presented frame carries. */
-    return (int32_t)(ws_nw_extra() / 2);
-}
-
-extern "C" int psx_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
-                                  const uint16_t* pixels) {
-    return gpu_mod_vram_write(x, y, w, h, pixels);
-}
-
-extern "C" int psx_mod_cheat_set_enabled(const char* name, int enabled) {
-    return psx_cheats_set_enabled(name, enabled);
 }
 
 extern "C" int psx_mod_register_function_entry_plugin(

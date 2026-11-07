@@ -24,6 +24,7 @@
  */
 #include "psx_cheats.h"
 #include "fntrace.h"
+#include "mod_plugins.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -119,6 +120,11 @@ int psx_cheats_set_enabled(const char *name, int enabled)
     s_ovr_count++;
     if (s_loaded) { apply_overrides(); recompute_active(); }
     return 1;
+}
+
+int psx_mod_cheat_set_enabled(const char *name, int enabled)
+{
+    return psx_cheats_set_enabled(name, enabled);
 }
 
 static int ram_addr(uint32_t word, uint32_t *out)

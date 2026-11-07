@@ -669,6 +669,10 @@ static int ws_nw_offset(void) {
 }
 int gpu_ws_configured_x_reveal(void) { return ws_nw_configured_offset(); }
 int ws_nw_extra(void) { return 2 * ws_nw_offset(); }
+/* mod_plugins.h. ws_nw_offset() is already 0 unless native-wide is ACTIVE
+ * (which folds in !gpu_ws_present_native_43), so this is exactly the reveal
+ * the presented frame carries. */
+int32_t psx_mod_ws_native_wide_offset(void) { return (int32_t)ws_nw_offset(); }
 
 static uint32_t ws_view_camera_addr, ws_view_min_addr, ws_view_max_addr, ws_view_active_addr;
 static int ws_view_manual;
@@ -8746,4 +8750,8 @@ int gpu_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
     gpu_vram_dirty_mark_rect((int)x, (int)y, (int)w, (int)h);
     gr_vram_transfer_in((int)x, (int)y, (int)w, (int)h, pixels);
     return 1;
+}
+int psx_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                       const uint16_t* pixels) {
+    return gpu_mod_vram_write(x, y, w, h, pixels);
 }
