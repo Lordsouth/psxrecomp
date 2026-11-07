@@ -1156,6 +1156,13 @@ if(BUILD_TESTING)
     endif()
     add_test(NAME depth24_present_hold_exec_test COMMAND depth24_present_hold_exec_test)
 
+    # Every gpu_exec_stubs.inc fixture links the real VRAM dirty map.
+    foreach(_gpu_exec_test gpu_textured_dot_nw_shift_exec ws_auto_ui_untextured_exec
+            ws_shared_split_ui_exec ws_local_view_margin ws_cull_margin_width
+            depth24_present_hold_exec)
+        target_sources(${_gpu_exec_test}_test PRIVATE src/gpu_vram_dirty.c)
+    endforeach()
+
     add_executable(ws_view_anchor_test tests/test_ws_view_anchor.c)
     add_executable(ws_view_anchor_gpu_test tests/test_ws_view_anchor_gpu.c
         src/psx_video_timing.c

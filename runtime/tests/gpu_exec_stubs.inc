@@ -32,7 +32,6 @@ void pgxp_projective_scope_end(PGXPProjectiveScope *scope) {
 uint32_t g_debug_current_func_addr;
 uint32_t g_debug_last_store_pc;
 CPUState *debug_cpu_ptr;
-int g_psx_vram_dirty_tracking;
 uint32_t g_psx_ram_size = 0x00200000u;
 uint32_t g_psx_ram_mask = 0x001FFFFFu;
 
@@ -240,8 +239,6 @@ int32_t ws_ui_anchor_for_bounds(int32_t x, int32_t width,
 }
 #endif
 
-void gpu_vram_dirty_mark_all(void) {}
-void gpu_vram_dirty_mark_row_impl(uint32_t y) { (void)y; }
 void psx_irq_raise(uint32_t bit, uint32_t detail) { (void)bit; (void)detail; }
 void event_ring_record_aux(uint16_t kind, uint8_t detail, uint32_t aux) {
     (void)kind; (void)detail; (void)aux;
@@ -253,6 +250,7 @@ uint32_t psx_compiled_irq_resume_pc(void) { return 0; }
 uint32_t psx_last_irq_check_pc(void) { return 0; }
 uint32_t psx_netplay_rb_sticky_bb_pc(void) { return 0; }
 void mod_runtime_on_vblank(void) {}
+void psx_cheats_on_vblank(void) {}
 bool screen_kind_from_name(const char *name, ScreenKind *out) {
     (void)name;
     if (out) *out = SCREEN_RAW;
@@ -296,6 +294,9 @@ void gr_set_scale(int scale) { (void)scale; }
 int gr_scale(void) { return 1; }
 void gr_set_texture_filter(int bilinear) { (void)bilinear; }
 int gr_texture_filter(void) { return 0; }
+/* As gpu_render.c on a backend without texture banks: only "no bank" selects. */
+int gr_texture_banks_supported(void) { return 0; }
+int gr_select_texture_bank(uint16_t id, int live_clut) { (void)live_clut; return !id; }
 void gr_set_semi_transparency(int enabled, int mode) { (void)enabled; (void)mode; }
 void gr_set_dither(int enabled) { (void)enabled; }
 void gr_set_mask_bits(int set_bit, int check_bit) { (void)set_bit; (void)check_bit; }

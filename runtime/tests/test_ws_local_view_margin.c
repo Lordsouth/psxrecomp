@@ -10,6 +10,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
+#define GPU_EXEC_REAL_UI_GROUP
 #include "../src/gpu.c"
 #include "gpu_exec_stubs.inc"
 
