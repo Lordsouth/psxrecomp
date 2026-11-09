@@ -1711,6 +1711,44 @@ int main() {
                   !reloaded.feature_enabled("alpha.mod", "big"),
               "auto-disabled features must persist through state.toml");
 
+        /* A default-on feature the player never set gives way to a conflict,
+         * and saves nothing, so it is back when the other is turned off. */
+        {
+            const fs::path yield_root = root / "default-yields";
+            write_text(yield_root / "packages/big.mod/1.0.0/manifest.toml",
+                       feature_package("big.mod",
+                           "[[feature]]\nid = \"big\"\nname = \"Big\"\n"
+                           "conflicts = [\"fix.mod/fix\"]\n"));
+            write_text(yield_root / "packages/fix.mod/1.0.0/manifest.toml",
+                       feature_package("fix.mod",
+                           "[[feature]]\nid = \"fix\"\nname = \"Fix\"\n"
+                           "default_enabled = true\n"));
+            const auto on = [](const ModResolution& plan) {
+                return std::any_of(plan.ordered.begin(), plan.ordered.end(),
+                    [](const ModPackage* p) { return p->id == "fix.mod"; });
+            };
+            write_text(yield_root / "state.toml",
+                       "format_version = 2\n\n[[feature]]\npackage_id = \"big.mod\"\n"
+                       "id = \"big\"\nenabled = true\n");
+            ModPackageManager old_state(yield_root);
+            check(old_state.scan(&error) && old_state.load_state(&error), error.c_str());
+            ModResolution plan = old_state.resolve("SLUS-TEST");
+            check(plan.errors.empty() && !on(plan),
+                  "a state from before the default must launch, with it off");
+            check(old_state.set_feature_enabled("big.mod", "big", false, &error), error.c_str());
+            plan = old_state.resolve("SLUS-TEST");
+            check(plan.errors.empty() && on(plan),
+                  "it must come back when the other is turned off");
+            std::vector<std::pair<std::string, std::string>> yield_off;
+            check(old_state.set_feature_enabled("big.mod", "big", true, &error, &yield_off) &&
+                      yield_off.empty() && old_state.resolve("SLUS-TEST").errors.empty(),
+                  "ticking the other must leave it unset and still launch");
+            check(old_state.set_feature_enabled("fix.mod", "fix", true, &error, &yield_off) &&
+                      !old_state.feature_enabled("big.mod", "big") &&
+                      old_state.resolve("SLUS-TEST").errors.empty(),
+                  "ticking it from its default must turn the other off: the last action wins");
+        }
+
         /* A hand-edited state.toml with both sides on gets a named
          * diagnostic, not a bare refusal. */
         write_text(conflict_root / "state.toml",

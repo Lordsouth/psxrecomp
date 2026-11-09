@@ -862,6 +862,10 @@ commit, and the launcher shows which features were turned off, for example
 "Turned off 52 new raisable Digimon, Evolution Unbound: they conflict with Digimon
 World 1.5.".
 
+A `default_enabled = true` feature the player has never set gives way by itself
+to an enabled feature it conflicts with. Nothing is saved, so a `state.toml` from
+before the default still launches, and the feature is back once the other is off.
+
 If both sides are enabled anyway (a hand-edited `state.toml`), resolution
 fails with one diagnostic per conflicting pair that names both features, for
 example `dw.1_5/dw15 (Digimon World 1.5) conflicts with

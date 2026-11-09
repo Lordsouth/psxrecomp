@@ -858,6 +858,16 @@ bool is_feature_enabled(const ModPackage& package, const ModSelection& selection
         ? selected->enabled : feature.default_enabled;
 }
 
+/* On only because its manifest says so: the player has never set it. */
+bool feature_left_at_default(const ModPackage& package,
+                             const ModSelection& selection,
+                             const ModFeature& feature) {
+    if (feature.legacy || !feature.default_enabled) return false;
+    const ModFeatureSelection* selected =
+        find_feature_selection(package, selection, feature.id);
+    return !selected || !selected->has_enabled;
+}
+
 /* Feature conflicts are symmetric: either side naming the other suffices. */
 bool features_conflict(const ModPackage& a, const ModFeature& feature_a,
                        const ModPackage& b, const ModFeature& feature_b) {
@@ -3457,7 +3467,9 @@ bool ModPackageManager::set_feature_enabled(
         std::vector<const ModFeature*> switched_on;
         for (const ModFeature& candidate : package->features)
             if (is_feature_enabled(*package, package_selection, candidate) &&
-                !is_feature_enabled(*package, previous, candidate))
+                (!is_feature_enabled(*package, previous, candidate) ||
+                 (candidate.id == feature_id &&
+                  feature_left_at_default(*package, previous, candidate))))
                 switched_on.push_back(&candidate);
         for (const auto& [other_id, versions] : packages_) {
             (void)versions;
@@ -3473,6 +3485,9 @@ bool ModPackageManager::set_feature_enabled(
                 if (!conflicts) continue;
                 ModSelection& selection = stage(other_id);
                 if (!is_feature_enabled(*other, selection, victim)) continue;
+                /* Gives way by itself (effective_selections), and so comes
+                 * back when this feature is turned off again. */
+                if (feature_left_at_default(*other, selection, victim)) continue;
                 if (victim.legacy)
                     selection.enabled = false;
                 else
@@ -3803,6 +3818,37 @@ std::map<std::string, ModSelection> ModPackageManager::effective_selections(
             }
         }
     }
+    /* A default-on feature the player never set gives way to an enabled feature
+     * it conflicts with. So a state.toml from before the default still launches,
+     * and nothing is saved: the feature is back when the other one is off. */
+    const std::map<std::string, ModSelection> settled_selections = effective;
+    const auto selection_before = [&](const std::string& id) -> const ModSelection& {
+        const auto found = settled_selections.find(id);
+        return found == settled_selections.end() ? blank : found->second;
+    };
+    for (const auto& [id, versions] : packages_) {
+        (void)versions;
+        const ModPackage* package = find_selected(packages_, id, selection_before(id));
+        if (!package) continue;
+        for (const ModFeature& feature : package->features) {
+            if (!feature_left_at_default(*package, selection_before(id), feature))
+                continue;
+            bool gives_way = false;
+            for (const auto& [other_id, other_versions] : packages_) {
+                (void)other_versions;
+                const ModPackage* other =
+                    find_selected(packages_, other_id, selection_before(other_id));
+                if (!other) continue;
+                for (const ModFeature& candidate : other->features)
+                    gives_way = gives_way ||
+                        (&candidate != &feature &&
+                         is_feature_enabled(*other, selection_before(other_id), candidate) &&
+                         !feature_left_at_default(*other, selection_before(other_id), candidate) &&
+                         features_conflict(*package, feature, *other, candidate));
+            }
+            if (gives_way) set_feature_selected(effective[id], feature.id, false);
+        }
+    }
     return effective;
 }
 
@@ -3939,8 +3985,14 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
             const auto found = selections_.find(key);
             return found == selections_.end() ? blank : found->second;
         };
+        const auto effective_for = [&](const std::string& key)
+            -> const ModSelection& {
+            const auto found = selections.find(key);
+            return found == selections.end() ? blank : found->second;
+        };
         for (const ModFeature& feature : package->features) {
-            if (!is_feature_enabled(*package, selection_for(id), feature))
+            if (!is_feature_enabled(*package, selection_for(id), feature) ||
+                !is_feature_enabled(*package, effective_for(id), feature))
                 continue;
             for (auto other = active.find(id); other != active.end(); ++other) {
                 for (const ModFeature& other_feature : other->second->features) {
@@ -3948,6 +4000,9 @@ ModResolution ModPackageManager::resolve(const std::string& game_id,
                         continue;
                     if (!is_feature_enabled(*other->second,
                                             selection_for(other->first),
+                                            other_feature) ||
+                        !is_feature_enabled(*other->second,
+                                            effective_for(other->first),
                                             other_feature) ||
                         !features_conflict(*package, feature, *other->second,
                                            other_feature))
