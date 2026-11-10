@@ -875,6 +875,35 @@ marks both feature rows.
 Package-level `conflicts = ["package.id"]` is unchanged: it still refuses a
 launch with both packages active and is not resolved automatically.
 
+## Feature editions
+
+A feature can stand in for another package's feature while something it needs
+is on (format 13):
+
+```toml
+[[feature]]
+id = "dw15-guaranteed-drops"
+name = "Guaranteed Item Drops (1.5)"
+hidden = true
+edition_of = "dw.vanilla.trainer/guaranteed-drops"
+
+[[constraint]]
+feature = "dw15-guaranteed-drops"
+kind = "requires_feature"
+requires_feature = "dw15"
+```
+
+While every in-package `requires_feature` of the edition is enabled and the
+named feature is enabled, `effective_selections()` turns the named feature off
+and the edition on, copies the named feature's option values onto the edition's
+options of the same id, and lists the edition in `implicit_features`, as
+required by the named feature. Nothing is saved, so the player keeps one
+checkbox and the edition goes when either side is turned off. An edition must
+have at least one `requires_feature` constraint, or it would replace the named
+feature unconditionally, and `edition_of` must name another package. Do not
+also declare the two as conflicting: the substitution already keeps them from
+running together, and a conflict would turn one off.
+
 ## State and migration
 
 `mods/state.toml` format 2 stores selected package versions separately from

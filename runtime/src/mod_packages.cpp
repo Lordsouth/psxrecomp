@@ -26,7 +26,7 @@ namespace PSXRecompV4 {
 namespace {
 
 constexpr uint32_t kMinFormatVersion = 1;
-constexpr uint32_t kMaxFormatVersion = 12;
+constexpr uint32_t kMaxFormatVersion = 13;
 constexpr uint64_t kMaxArchiveBytes = 256ull * 1024ull * 1024ull;
 constexpr uint32_t kMaxArchiveFiles = 4096;
 
@@ -1979,6 +1979,20 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                                 "feature conflicts with itself: " + key);
                     }
                 }
+                if (v.contains("edition_of")) {
+                    if (out.format_version < 13)
+                        throw std::runtime_error(
+                            "feature edition_of requires format_version 13");
+                    feature.edition_of = toml::find<std::string>(v, "edition_of");
+                    const size_t slash = feature.edition_of.find('/');
+                    if (slash == std::string::npos ||
+                        !valid_id(feature.edition_of.substr(0, slash)) ||
+                        !valid_id(feature.edition_of.substr(slash + 1)) ||
+                        feature.edition_of.substr(0, slash) == out.id)
+                        throw std::runtime_error(
+                            "edition_of must name another package's feature as "
+                            "\"package_id/feature_id\": " + feature.edition_of);
+                }
                 out.features.push_back(std::move(feature));
             }
             if (out.features.empty())
@@ -2235,6 +2249,17 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                 }
                 out.constraints.push_back(std::move(constraint));
             }
+        }
+        /* An edition stands in only while what it is the edition FOR is on. */
+        for (const ModFeature& feature : out.features) {
+            if (feature.edition_of.empty()) continue;
+            if (std::none_of(out.constraints.begin(), out.constraints.end(),
+                    [&](const ModConstraint& c) {
+                        return c.kind == ModConstraintKind::RequiresFeature &&
+                               c.feature_id == feature.id;
+                    }))
+                throw std::runtime_error(
+                    feature.id + ": edition_of needs a requires_feature constraint");
         }
         if (cfg.contains("requirement")) {
             if (!feature_style)
@@ -3816,6 +3841,54 @@ std::map<std::string, ModSelection> ModPackageManager::effective_selections(
                 }
                 changed = true;
             }
+        }
+    }
+    /* Editions: a feature with edition_of runs in place of that feature while
+     * its own requires_feature chain is on (say, Guaranteed Drops while 1.5 is
+     * on runs its 1.5 edition). The player keeps one checkbox; nothing is saved.
+     * Requirements are settled above, so the chain is read as final. */
+    for (const auto& [id, versions] : packages_) {
+        (void)versions;
+        const ModPackage* package = find_selected(packages_, id, selection_of(id));
+        if (!package) continue;
+        for (const ModFeature& edition : package->features) {
+            if (edition.edition_of.empty()) continue;
+            const size_t slash = edition.edition_of.find('/');
+            const std::string of_id = edition.edition_of.substr(0, slash);
+            const ModPackage* of_package =
+                find_selected(packages_, of_id, selection_of(of_id));
+            const ModFeature* original = of_package
+                ? find_feature(*of_package, edition.edition_of.substr(slash + 1))
+                : nullptr;
+            if (!original || original->legacy ||
+                !is_feature_enabled(*of_package, selection_of(of_id), *original))
+                continue;
+            const bool chain_on = std::all_of(
+                package->constraints.begin(), package->constraints.end(),
+                [&](const ModConstraint& c) {
+                    if (c.kind != ModConstraintKind::RequiresFeature ||
+                        c.feature_id != edition.id)
+                        return true;
+                    const ModFeature* required =
+                        find_feature(*package, c.required_feature_id);
+                    return required &&
+                           is_feature_enabled(*package, selection_of(id), *required);
+                });
+            if (!chain_on) continue;
+            ModSelection with_edition = selection_of(id);
+            const bool was_on = is_feature_enabled(*package, with_edition, edition);
+            set_feature_selected(with_edition, edition.id, true);
+            for (const ModOption& option : package->options) {
+                if (option.feature_id != edition.id) continue;
+                const std::string value = effective_option_value(
+                    *of_package, selection_of(of_id), original->id, option.id);
+                if (!value.empty() && valid_option_value(option, value))
+                    with_edition.features[edition.id].values[option.id] = value;
+            }
+            effective[id] = std::move(with_edition);
+            set_feature_selected(effective[of_id], original->id, false);
+            if (implicit && !was_on)
+                implicit->push_back({id, edition.id, of_id, original->id});
         }
     }
     /* A default-on feature the player never set gives way to an enabled feature

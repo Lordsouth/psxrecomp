@@ -86,6 +86,10 @@ struct ModFeature {
     /* "package_id/feature_id" keys this feature cannot run alongside (format
      * 6). Symmetric: either side naming the other is enough. */
     std::vector<std::string> conflicts;
+    /* "package_id/feature_id" this feature stands in for (format 13). While
+     * its requires_feature chain is on and that feature is enabled, the
+     * session runs this one instead, with the same option values. */
+    std::string edition_of;
     /* Manifest `quick`: offered in the launcher's Quick Mods card by default.
      * The player's own choice (state.toml [quick_mods]) overrides it. */
     bool quick = false;

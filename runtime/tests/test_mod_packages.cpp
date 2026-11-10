@@ -1749,6 +1749,69 @@ int main() {
                   "ticking it from its default must turn the other off: the last action wins");
         }
 
+        /* An edition runs in place of the feature it is the edition of while
+         * its own requires_feature chain is on, with the player's options. */
+        {
+            const fs::path ed_root = root / "editions";
+            const std::string level =
+                "[[option]]\nfeature = \"%F\"\nid = \"level\"\nlabel = \"Level\"\n"
+                "type = \"choice\"\ndefault = \"a\"\n"
+                "[[option.choice]]\nvalue = \"a\"\nlabel = \"A\"\n"
+                "[[option.choice]]\nvalue = \"b\"\nlabel = \"B\"\n";
+            const auto with_feature = [&](const std::string& f) {
+                std::string s = level;
+                s.replace(s.find("%F"), 2, f);
+                return s;
+            };
+            write_text(ed_root / "packages/base.mod/1.0.0/manifest.toml",
+                       feature_package("base.mod",
+                           "[[feature]]\nid = \"drops\"\nname = \"Drops\"\n" +
+                           with_feature("drops")));
+            std::string ed = feature_package("ed.mod",
+                "[[feature]]\nid = \"core\"\nname = \"Core\"\n"
+                "[[feature]]\nid = \"drops15\"\nname = \"Drops (core)\"\nhidden = true\n"
+                "edition_of = \"base.mod/drops\"\n" + with_feature("drops15") +
+                "[[constraint]]\nfeature = \"drops15\"\nkind = \"requires_feature\"\n"
+                "requires_feature = \"core\"\n");
+            ed.replace(ed.find("format_version = 12"), 19, "format_version = 13");
+            write_text(ed_root / "packages/ed.mod/1.0.0/manifest.toml", ed);
+            const auto sel_on = [](const ModResolution& plan, const std::string& pkg,
+                                   const std::string& f) {
+                const auto p = plan.selections.find(pkg);
+                if (p == plan.selections.end()) return false;
+                const auto q = p->second.features.find(f);
+                return q != p->second.features.end() && q->second.has_enabled &&
+                       q->second.enabled;
+            };
+            write_text(ed_root / "state.toml",
+                       "format_version = 2\n\n[[feature]]\npackage_id = \"base.mod\"\n"
+                       "id = \"drops\"\nenabled = true\nvalues = { level = \"b\" }\n");
+            ModPackageManager eds(ed_root);
+            check(eds.scan(&error) && eds.load_state(&error), error.c_str());
+            ModResolution plan = eds.resolve("SLUS-TEST");
+            check(plan.errors.empty() && sel_on(plan, "base.mod", "drops") &&
+                      !sel_on(plan, "ed.mod", "drops15"),
+                  "without its chain the edition must stay out of the way");
+            check(eds.set_feature_enabled("ed.mod", "core", true, &error), error.c_str());
+            plan = eds.resolve("SLUS-TEST");
+            const auto implicit = std::any_of(
+                plan.implicit_features.begin(), plan.implicit_features.end(),
+                [](const ModResolution::ImplicitFeature& f) {
+                    return f.package_id == "ed.mod" && f.feature_id == "drops15";
+                });
+            check(plan.errors.empty() && !sel_on(plan, "base.mod", "drops") &&
+                      sel_on(plan, "ed.mod", "drops15") && implicit &&
+                      plan.selections["ed.mod"].features["drops15"].values["level"] == "b",
+                  "with its chain on the edition must run instead, with the player's option");
+            check(eds.feature_enabled("base.mod", "drops") &&
+                      !eds.feature_enabled("ed.mod", "drops15"),
+                  "the swap must not be saved: the player's checkbox stays as it was");
+            check(eds.set_feature_enabled("base.mod", "drops", false, &error), error.c_str());
+            plan = eds.resolve("SLUS-TEST");
+            check(plan.errors.empty() && !sel_on(plan, "ed.mod", "drops15"),
+                  "the edition must go when its original is turned off");
+        }
+
         /* A hand-edited state.toml with both sides on gets a named
          * diagnostic, not a bare refusal. */
         write_text(conflict_root / "state.toml",
