@@ -1806,6 +1806,19 @@ int main() {
             check(eds.feature_enabled("base.mod", "drops") &&
                       !eds.feature_enabled("ed.mod", "drops15"),
                   "the swap must not be saved: the player's checkbox stays as it was");
+            /* Netplay: a peer adopts the host's selection (not its derived plan)
+             * and resolves it itself. It must reach the same plan. */
+            {
+                ModPackageManager peer(ed_root);
+                check(peer.scan(&error), error.c_str());
+                const auto own = peer.exchange_selections(eds.selections());
+                const ModResolution peer_plan = peer.resolve("SLUS-TEST");
+                check(peer_plan.errors.empty() && peer_plan.fingerprint == plan.fingerprint &&
+                          sel_on(peer_plan, "ed.mod", "drops15") &&
+                          !sel_on(peer_plan, "base.mod", "drops"),
+                      "a peer resolving the host's selection must derive the same edition and fingerprint");
+                peer.exchange_selections(own);
+            }
             check(eds.set_feature_enabled("base.mod", "drops", false, &error), error.c_str());
             plan = eds.resolve("SLUS-TEST");
             check(plan.errors.empty() && !sel_on(plan, "ed.mod", "drops15"),
