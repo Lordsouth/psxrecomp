@@ -819,7 +819,8 @@ fingerprint.
 A delta-owned sector is one the delta changes or appends. A `disc_user` or
 `disc_raw` `[[patch]]` may write inside one only when its feature is the
 delta's own feature or requires it through `requires_feature` constraints in
-the same package (chains count: A requires B requires the delta's feature).
+the same package or unconditional `[[requirement]]`s across packages (chains
+count: A requires B requires the delta's feature).
 The delta is then always present beneath the write, so:
 
 - its `expected` bytes are the patched disc's bytes, not the stock disc's;
@@ -893,14 +894,16 @@ kind = "requires_feature"
 requires_feature = "dw15"
 ```
 
-While every in-package `requires_feature` of the edition is enabled and the
-named feature is enabled, `effective_selections()` turns the named feature off
+The edition may sit in the named feature's own package. While every
+in-package `requires_feature` and every unconditional `[[requirement]]` of the
+edition is enabled, and the named feature is enabled, `effective_selections()` turns the named feature off
 and the edition on, copies the named feature's option values onto the edition's
 options of the same id, and lists the edition in `implicit_features`, as
 required by the named feature. Nothing is saved, so the player keeps one
 checkbox and the edition goes when either side is turned off. An edition must
-have at least one `requires_feature` constraint, or it would replace the named
-feature unconditionally, and `edition_of` must name another package. Do not
+have at least one `requires_feature` constraint or unconditional
+`[[requirement]]`, or it would replace the named feature unconditionally, and
+`edition_of` must name another feature. Do not
 also declare the two as conflicting: the substitution already keeps them from
 running together, and a conflict would turn one off.
 

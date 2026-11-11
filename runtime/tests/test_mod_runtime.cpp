@@ -993,6 +993,33 @@ static void test_disc_delta_writes() {
                          "disc delta") != std::string::npos,
           "an overlay on a delta sector must collide even when required");
 
+    /* Allowed: another package's feature that requires the delta through an
+     * unconditional [[requirement]] (the delta is then always beneath it). */
+    {
+        const fs::path other = root / "installed/delta.friend/1.0.0";
+        write_text(other / "manifest.toml",
+            "format_version = 12\nid = \"delta.friend\"\nversion = \"1.0.0\"\n"
+            "name = \"Friend\"\n[[target]]\ngame_id = \"SLUS-DELTA\"\n"
+            "disc_sha256 = \"" + sha256_hex(stock) + "\"\n"
+            "[[feature]]\nid = \"map\"\nname = \"map\"\n"
+            "[[requirement]]\nfeature = \"map\"\npackage = \"delta.writes\"\n"
+            "requires_feature = \"remaster\"\n"
+            "[[patch]]\nfeature = \"map\"\ntarget = \"disc_user\"\noffset = " +
+            std::to_string(19 * 2048 + 0x60) + "\nexpected = \"" +
+            hex(user(target, 19) + 0x60, 1) + "\"\nreplace = \"5a\"\n");
+        write_text(root / "state.toml",
+            "format_version = 2\n[[package]]\nid = \"delta.writes\"\nversion = \"1.0.0\"\n"
+            "[[feature]]\npackage_id = \"delta.writes\"\nid = \"remaster\"\nenabled = true\n"
+            "[[package]]\nid = \"delta.friend\"\nversion = \"1.0.0\"\n"
+            "[[feature]]\npackage_id = \"delta.friend\"\nid = \"map\"\nenabled = true\n");
+        check(commit(error), error.c_str());
+        std::vector<uint8_t> with_friend(target);
+        with_friend[19 * kRaw + 24 + 0x60] = 0x5a;
+        check(disc_serves(stock_path, with_friend),
+              "a cross-package required write must apply after the delta");
+        fs::remove_all(root / "installed/delta.friend");
+    }
+
     /* Refused: the stock byte no longer guards a delta sector. The guard is
      * checked against the delta before launch, not when the sector is read. */
     select({"remaster", "stale"});

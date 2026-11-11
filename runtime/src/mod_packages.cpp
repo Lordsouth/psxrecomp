@@ -1988,9 +1988,9 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                     if (slash == std::string::npos ||
                         !valid_id(feature.edition_of.substr(0, slash)) ||
                         !valid_id(feature.edition_of.substr(slash + 1)) ||
-                        feature.edition_of.substr(0, slash) == out.id)
+                        feature.edition_of == out.id + "/" + feature.id)
                         throw std::runtime_error(
-                            "edition_of must name another package's feature as "
+                            "edition_of must name another feature as "
                             "\"package_id/feature_id\": " + feature.edition_of);
                 }
                 out.features.push_back(std::move(feature));
@@ -2250,17 +2250,6 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                 out.constraints.push_back(std::move(constraint));
             }
         }
-        /* An edition stands in only while what it is the edition FOR is on. */
-        for (const ModFeature& feature : out.features) {
-            if (feature.edition_of.empty()) continue;
-            if (std::none_of(out.constraints.begin(), out.constraints.end(),
-                    [&](const ModConstraint& c) {
-                        return c.kind == ModConstraintKind::RequiresFeature &&
-                               c.feature_id == feature.id;
-                    }))
-                throw std::runtime_error(
-                    feature.id + ": edition_of needs a requires_feature constraint");
-        }
         if (cfg.contains("requirement")) {
             if (!feature_style)
                 throw std::runtime_error(
@@ -2309,6 +2298,24 @@ bool ModPackageManager::read_manifest(const fs::path& path, ModPackage& out,
                                 requirement.when, "requirement");
                 out.requirements.push_back(std::move(requirement));
             }
+        }
+        /* An edition stands in only while what it is the edition FOR is on:
+         * an in-package requires_feature or an unconditional [[requirement]]. */
+        for (const ModFeature& feature : out.features) {
+            if (feature.edition_of.empty()) continue;
+            const bool gated =
+                std::any_of(out.constraints.begin(), out.constraints.end(),
+                    [&](const ModConstraint& c) {
+                        return c.kind == ModConstraintKind::RequiresFeature &&
+                               c.feature_id == feature.id;
+                    }) ||
+                std::any_of(out.requirements.begin(), out.requirements.end(),
+                    [&](const ModFeatureRequirement& r) {
+                        return r.feature_id == feature.id && r.when.empty();
+                    });
+            if (!gated)
+                throw std::runtime_error(feature.id +
+                    ": edition_of needs a requires_feature constraint or requirement");
         }
         if (cfg.contains("patch")) {
             size_t declaration_index = 0;
@@ -3874,7 +3881,18 @@ std::map<std::string, ModSelection> ModPackageManager::effective_selections(
                     return required &&
                            is_feature_enabled(*package, selection_of(id), *required);
                 });
-            if (!chain_on) continue;
+            const bool needs_on = std::all_of(
+                package->requirements.begin(), package->requirements.end(),
+                [&](const ModFeatureRequirement& r) {
+                    if (r.feature_id != edition.id || !r.when.empty()) return true;
+                    const ModPackage* provider =
+                        find_selected(packages_, r.package_id, selection_of(r.package_id));
+                    const ModFeature* required = provider
+                        ? find_feature(*provider, r.required_feature_id) : nullptr;
+                    return required && is_feature_enabled(
+                        *provider, selection_of(r.package_id), *required);
+                });
+            if (!chain_on || !needs_on) continue;
             ModSelection with_edition = selection_of(id);
             const bool was_on = is_feature_enabled(*package, with_edition, edition);
             set_feature_selected(with_edition, edition.id, true);

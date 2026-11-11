@@ -1810,6 +1810,30 @@ int main() {
             plan = eds.resolve("SLUS-TEST");
             check(plan.errors.empty() && !sel_on(plan, "ed.mod", "drops15"),
                   "the edition must go when its original is turned off");
+
+            /* An edition in its original's own package, gated by another
+             * package's feature through an unconditional [[requirement]]. */
+            std::string mp = feature_package("map.mod",
+                "[[feature]]\nid = \"map\"\nname = \"Map\"\n"
+                "[[feature]]\nid = \"map15\"\nname = \"Map (core)\"\nhidden = true\n"
+                "edition_of = \"map.mod/map\"\n"
+                "[[requirement]]\nfeature = \"map15\"\npackage = \"ed.mod\"\n"
+                "requires_feature = \"core\"\n");
+            mp.replace(mp.find("format_version = 12"), 19, "format_version = 13");
+            write_text(ed_root / "packages/map.mod/1.0.0/manifest.toml", mp);
+            ModPackageManager maps(ed_root);
+            check(maps.scan(&error) && maps.load_state(&error), error.c_str());
+            check(maps.set_feature_enabled("map.mod", "map", true, &error), error.c_str());
+            check(maps.set_feature_enabled("ed.mod", "core", false, &error), error.c_str());
+            plan = maps.resolve("SLUS-TEST");
+            check(plan.errors.empty() && sel_on(plan, "map.mod", "map") &&
+                      !sel_on(plan, "map.mod", "map15"),
+                  "a same-package edition must wait for the feature it requires");
+            check(maps.set_feature_enabled("ed.mod", "core", true, &error), error.c_str());
+            plan = maps.resolve("SLUS-TEST");
+            check(plan.errors.empty() && !sel_on(plan, "map.mod", "map") &&
+                      sel_on(plan, "map.mod", "map15") && maps.feature_enabled("map.mod", "map"),
+                  "with that feature on, the same-package edition must run in its place");
         }
 
         /* A hand-edited state.toml with both sides on gets a named

@@ -1407,24 +1407,36 @@ bool materialize_disc_delta(RuntimeMods& s, ModResolution& plan,
     };
     /* A write may sit on delta-owned sectors only when the delta is always
      * beneath it: its feature is the delta's own, or requires it through
-     * in-package requires_feature constraints (followed through chains). */
-    const ModPackage* delta_package = nullptr;
-    for (const ModPackage* package : plan.ordered)
-        if (package && package->id == delta.package_id) delta_package = package;
+     * in-package requires_feature constraints or unconditional cross-package
+     * [[requirement]]s, followed through chains. Both activate what they
+     * name whenever the requiring feature runs. */
+    const auto package_in_plan = [&](const std::string& id) -> const ModPackage* {
+        for (const ModPackage* package : plan.ordered)
+            if (package && package->id == id) return package;
+        return nullptr;
+    };
+    const ModPackage* delta_package = package_in_plan(delta.package_id);
     const auto requires_delta = [&](const ModResolution::Write& write) {
-        if (!delta_package || write.package_id != delta.package_id)
-            return false;
-        std::set<std::string> seen;
-        std::vector<std::string> pending{write.feature_id};
+        if (!delta_package) return false;
+        std::set<std::pair<std::string, std::string>> seen;
+        std::vector<std::pair<std::string, std::string>> pending{
+            {write.package_id, write.feature_id}};
         while (!pending.empty()) {
-            const std::string feature = pending.back();
+            const auto [package_id, feature] = pending.back();
             pending.pop_back();
-            if (feature == delta.feature_id) return true;
-            if (!seen.insert(feature).second) continue;
-            for (const ModConstraint& constraint : delta_package->constraints)
+            if (package_id == delta.package_id && feature == delta.feature_id)
+                return true;
+            if (!seen.insert({package_id, feature}).second) continue;
+            const ModPackage* package = package_in_plan(package_id);
+            if (!package) continue;
+            for (const ModConstraint& constraint : package->constraints)
                 if (constraint.kind == ModConstraintKind::RequiresFeature &&
                     constraint.feature_id == feature)
-                    pending.push_back(constraint.required_feature_id);
+                    pending.push_back({package_id, constraint.required_feature_id});
+            for (const ModFeatureRequirement& requirement : package->requirements)
+                if (requirement.feature_id == feature && requirement.when.empty())
+                    pending.push_back({requirement.package_id,
+                                       requirement.required_feature_id});
         }
         return false;
     };
