@@ -825,7 +825,7 @@ The delta is then always present beneath the write, so:
 
 - its `expected` bytes are the patched disc's bytes, not the stock disc's;
 - it is guarded and applied after the delta's bytes on every read: raw and
-  2048-byte drive reads, host reads (`psx_mod_read_disc_file`), and sectors
+  2048-byte drive reads, host reads (`psx_mod_read_disc_file`, `psx_mod_read_disc_sectors`), and sectors
   past the stock end;
 - its guard on the delta's sectors is checked against the delta before
   launch, and a mismatch refuses the launch with `<package>/<feature> expected

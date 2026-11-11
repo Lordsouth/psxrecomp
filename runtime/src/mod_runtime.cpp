@@ -3777,6 +3777,26 @@ extern "C" int psx_mod_read_disc_file(const char* path, void* buffer,
     } catch (...) { return 0; }
 }
 
+extern "C" int psx_mod_read_disc_sectors(uint32_t lba, uint32_t count, void* buffer) {
+    using namespace PSXRecompV4;
+    if (!buffer || !count || count > kMaxDiscFileBytes / 2048u) return 0;
+    try {
+        const auto mount = mounted_disc_path(state());
+        if (mount.empty()) return 0;
+        PS1::ISOReader fresh;
+        PS1::ISOReader* reader = mod_disc_read_reader(mount.string(), fresh);
+        if (!reader) return 0;
+        for (uint32_t i = 0; i < count; ++i) {
+            if (g_progress_hook && !(i & 1023u)) g_progress_hook();
+            if (!read_effective_user_sector(*reader, lba + i,
+                                            static_cast<uint8_t*>(buffer) + i * 2048u))
+                return 0;
+        }
+        if (g_progress_hook) g_progress_hook();
+        return 1;
+    } catch (...) { return 0; }
+}
+
 extern "C" int psx_mod_disc_file_extent(const char* path, uint32_t* lba,
                                         uint32_t* size) {
     using namespace PSXRecompV4;

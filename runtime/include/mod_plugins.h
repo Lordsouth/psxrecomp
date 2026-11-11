@@ -239,6 +239,11 @@ int psx_mod_game_started(void);
  * otherwise capacity must hold the entire file. Active sector mods apply. */
 int psx_mod_read_disc_file(const char* path, void* buffer, uint32_t capacity,
                            uint32_t* size);
+/* Read `count` 2048-byte user sectors starting at `lba` into `buffer` (which
+ * must hold count * 2048 bytes), for files with no ISO directory entry.
+ * Returns 1 only when every sector was read. Same thread rule and view as
+ * psx_mod_read_disc_file: active sector mods and the disc delta apply. */
+int psx_mod_read_disc_sectors(uint32_t lba, uint32_t count, void* buffer);
 /* 1-based roster index of the disc image the guest drive has mounted, or 0
  * for a single-image session. It changes when the player swaps discs; the
  * psx_mod_read_disc_file / psx_mod_disc_file_extent calls read that image. */

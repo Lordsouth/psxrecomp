@@ -960,6 +960,13 @@ static void test_disc_delta_writes() {
               std::memcmp(file.data(), effective.data() + 18 * kRaw + 24,
                           2048) == 0,
           "host reads must serve a delta sector with raw and user writes");
+    std::vector<uint8_t> raw(2 * 2048);
+    check(psx_mod_read_disc_sectors(18, 2, raw.data()) &&
+              std::memcmp(raw.data(), effective.data() + 18 * kRaw + 24, 2048) == 0 &&
+              std::memcmp(raw.data() + 2048, effective.data() + 19 * kRaw + 24, 2048) == 0,
+          "sector reads must serve the delta and its writes, past the stock end too");
+    check(!psx_mod_read_disc_sectors(0xFFFFFF, 1, raw.data()),
+          "a sector past the image must fail, not read garbage");
     const std::string writes_fingerprint =
         PSXRecompV4::mod_runtime_fingerprint();
     check(writes_fingerprint != delta_fingerprint,
