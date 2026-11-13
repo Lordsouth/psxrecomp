@@ -178,7 +178,9 @@ uint32_t spu_private_voice_active(void);
 #define SPU_SHADOW_MAX_VOICES 48
 
 typedef struct {
-    int16_t  s[4];     /* decoded samples sample_idx-1 .. +2 (block-edge clamped) */
+    int16_t  s[4];     /* decoded samples sample_idx-3 .. sample_idx, the hardware
+                          Gaussian's window (previous block's tail when < 0);
+                          interpolate between s[1] and s[2]. Noise voices: 4x LFSR */
     float    frac;     /* fractional sub-sample phase in [0,1) */
     uint16_t env;      /* env_level (0..0x7FFF) */
     int16_t  vol_l;    /* per-voice L volume, 1.14 scale (effective int16 >> 1) */
@@ -191,6 +193,8 @@ typedef struct {
     int16_t main_l;
     int16_t main_r;
     int     enabled;
+    int32_t wet_l;     /* canon reverb return this frame, pre main volume */
+    int32_t wet_r;
 } SpuShadowFrameTapPub;
 
 /* Pointer to the tap array (SpuShadowFrameTapPub[]) and the number of valid

@@ -73,7 +73,7 @@ static float catmull_rom(const int16_t s[4], float t) {
 void spu_shadow_process(int16_t* canon, int frames) {
     if (!spu_shadow_enabled() || !canon || frames <= 0) return;
 
-    /* This shadow models voices only, not the CD/XA bus. A previously proven
+    /* This shadow models voices + the reverb return, not the CD/XA bus. A previously proven
      * voice mix must not hide the first seconds of newly starting movie audio
      * while the windowed verifier gathers strikes. Preserve the complete
      * canonical mix immediately, and require fresh proof when CD is disabled. */
@@ -132,6 +132,10 @@ void spu_shadow_process(int16_t* canon, int frames) {
                 ml += sv * (float)t->vol_l * (1.0f / 16384.0f);
                 mr += sv * (float)t->vol_r * (1.0f / 16384.0f);
             }
+            /* The canon's reverb return joins the bus before main volume, as
+             * in spu.c. Without it the substituted mix played dry. */
+            ml += (float)fr->wet_l;
+            mr += (float)fr->wet_r;
             ml *= (float)fr->main_l * (1.0f / 16384.0f);
             mr *= (float)fr->main_r * (1.0f / 16384.0f);
         }

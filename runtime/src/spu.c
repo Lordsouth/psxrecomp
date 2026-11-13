@@ -602,7 +602,11 @@ static void decode_block(SpuVoice *v) {
             spu_regs[(uint32_t)v_idx * 8u + 7u] = (uint16_t)(addr >> 3);
     }
     v->flags = flags;
-    v->sample_idx = 0;
+    /* Whole sample steps that ran past the old block land in this one: the
+     * hardware counter is continuous across blocks (pitch > 0x1000 can take
+     * up to 4 steps in one sample). Resetting to 0 dropped them and put one
+     * sample per block at the wrong position (buzz on pitched-up notes). */
+    v->sample_idx -= SPU_BLOCK_SAMPLES;
     v->cur_addr = (addr + 16u) & (SPU_RAM_SIZE - 1u);
 
     /* Latch end-block-reached so the BIOS music engine sees ENDX[v] = 1
@@ -870,6 +874,8 @@ typedef struct {
     int16_t main_l;
     int16_t main_r;
     int     enabled;   /* SPU control enable bit this block */
+    int32_t wet_l;     /* canon reverb return, pre main volume */
+    int32_t wet_r;
 } SpuShadowFrameTap;
 
 /* Sized to the largest spu_render block (main.cpp caps at 2048 frames). */
@@ -944,6 +950,7 @@ static int16_t voice_next_sample(int idx) {
      * decoding/address advance, ENDX latching, pitch stepping, the ADSR
      * envelope and the volume stages — behaves exactly as for ADPCM. */
     int16_t raw_s = 0;
+    int noise_voice = 0;
     uint32_t non_mask = (uint32_t)spu_regs[reg_index(0x1F801D94u)]
                       | ((uint32_t)spu_regs[reg_index(0x1F801D96u)] << 16);
     if (!audible) {
@@ -951,6 +958,7 @@ static int16_t voice_next_sample(int idx) {
     } else if (idx<SPU_VOICE_COUNT?(non_mask & (1u << idx)):
             (private_modes[idx-SPU_VOICE_COUNT]&1u)) {
         raw_s = (int16_t)noise_lfsr;
+        noise_voice = 1;
     } else {
         raw_s = spu_gaussian_interpolate(v->previous_samples,
                                          v->samples,
@@ -962,23 +970,21 @@ static int16_t voice_next_sample(int idx) {
     if (shaped > 32767)  shaped = 32767;
     if (shaped < -32768) shaped = -32768;
 
-    /* Shadow tap: record the four decoded samples bracketing the current
-     * sample position + the fractional phase + envelope, BEFORE the phase
-     * advances. The optional shadow keeps its own cubic, block-clamped window;
-     * the canonical hardware path above independently uses the preceding
-     * block's tail for Gaussian interpolation. */
+    /* Shadow tap: the same four samples the Gaussian above read (sample_idx-3
+     * .. sample_idx, reaching into the previous block's tail), the fractional
+     * phase and envelope, BEFORE the phase advances. The cubic interpolates
+     * between s[1] and s[2], where the Gaussian's weight sits, so both paths
+     * keep the same timing. Clamping this window inside the current block
+     * held the last sample and then jumped at every block edge: a click per
+     * block, a buzz on low notes (pitch 0x200 = one click per 224 samples). */
     if (audible && s_shadow_tap_on && s_shadow_tap_frame < SPU_SHADOW_TAP_FRAMES) {
         SpuShadowVoiceTap *t =
             &s_shadow_tap[s_shadow_tap_frame].voice[idx];
-        int si = v->sample_idx;
-        int i0 = si - 1, i2 = si + 1, i3 = si + 2;
-        if (i0 < 0) i0 = 0;
-        if (i2 >= SPU_BLOCK_SAMPLES) i2 = SPU_BLOCK_SAMPLES - 1;
-        if (i3 >= SPU_BLOCK_SAMPLES) i3 = SPU_BLOCK_SAMPLES - 1;
-        t->s[0] = v->samples[i0];
-        t->s[1] = v->samples[si];
-        t->s[2] = v->samples[i2];
-        t->s[3] = v->samples[i3];
+        for (int k = 0; k < 4; k++) {
+            int o = v->sample_idx - 3 + k;
+            t->s[k] = noise_voice ? raw_s
+                    : o >= 0 ? v->samples[o] : v->previous_samples[3 + o];
+        }
         t->frac = (float)v->phase / 4096.0f;
         t->env  = v->env_level;
         t->active = 1;
@@ -1003,11 +1009,8 @@ static int16_t voice_next_sample(int idx) {
      * pitch to the counter, so zero holds. */
     uint32_t pitch = voice_reg(idx, 2) & 0x3FFFu;
     v->phase += pitch;
-    while (v->phase >= 0x1000u) {
-        v->phase -= 0x1000u;
-        v->sample_idx++;
-        if (v->sample_idx >= SPU_BLOCK_SAMPLES) break;
-    }
+    v->sample_idx += (int)(v->phase >> 12);
+    v->phase &= 0xFFFu;
     return (int16_t)shaped;
 }
 
@@ -1417,6 +1420,10 @@ static void spu_render_block(int16_t* out_stereo, int frames) {
                 }
                 mix_l += wet_l;
                 mix_r += wet_r;
+                if (s_shadow_tap_on && f < SPU_SHADOW_TAP_FRAMES) {
+                    s_shadow_tap[f].wet_l = wet_l;   /* the shadow mixes the reverb too */
+                    s_shadow_tap[f].wet_r = wet_r;
+                }
             }
 
             /* The 16-bit mix bus saturates BEFORE the main volume applies

@@ -166,6 +166,57 @@ static void test_half_pitch_advances_half_as_fast(void) {
           "pitch 0x0800 advances one sample every two outputs");
 }
 
+/* Above 0x1000 one output can take several sample steps, and the step that
+ * crosses a block end must land in the next block. The old loop stopped at the
+ * block end and the next block restarted at sample 0, so the first output of
+ * every block read a sample up to 3 steps early: a buzz on pitched-up notes
+ * (Digimon World plays most music voices at 0x104A..0x1AE8). After each output
+ * the voice must sit on its true position, sample_idx counted inside the
+ * block that cur_addr has just passed, with a phase fraction below one step. */
+static void test_fast_pitch_carries_steps_across_blocks(void) {
+    static const uint16_t pitches[] = { 0x1428u, 0x1AE8u, 0x3000u, 0x3FFFu };
+    for (unsigned p = 0; p < sizeof pitches / sizeof pitches[0]; p++) {
+        spu_init();
+        stage_ram();
+        SpuVoice *v = stage_voice(pitches[p]);
+        int bad_pos = 0, bad_phase = 0;
+        for (uint32_t k = 1; k <= 200; k++) {
+            (void)voice_next_sample(0);
+            uint32_t blocks = (v->cur_addr - VOICE_START) / 16u;   /* decoded so far */
+            uint32_t pos = (blocks - 1u) * SPU_BLOCK_SAMPLES + (uint32_t)v->sample_idx;
+            if (pos != (k * pitches[p]) >> 12) bad_pos = 1;
+            if (v->phase >= 0x1000u) bad_phase = 1;
+        }
+        char msg[96];
+        snprintf(msg, sizeof msg, "pitch 0x%04X keeps the sample position across blocks",
+                 pitches[p]);
+        CHECK(!bad_pos && !bad_phase, msg);
+    }
+}
+
+/* The HQ shadow's 4-sample window must slide one sample per output at pitch
+ * 0x1000, across block edges too. It used to be clamped inside the current
+ * block: the last sample was held, then the window jumped to the next block,
+ * a click at every block edge of every voice. The staged blocks hold 4096,
+ * 20480 and 28672, so a clamped window shows up as a wrong value. */
+static void test_shadow_window_slides_across_blocks(void) {
+    spu_init();
+    stage_ram();
+    (void)stage_voice(0x1000u);
+    s_shadow_tap_on = 1;
+    int16_t prev[4] = {0, 0, 0, 0};
+    int broken = 0;
+    for (int f = 0; f < 3 * SPU_BLOCK_SAMPLES - 2; f++) {
+        s_shadow_tap_frame = 0;
+        (void)voice_next_sample(0);
+        const int16_t *s = s_shadow_tap[0].voice[0].s;
+        if (f > 0 && (s[0] != prev[1] || s[1] != prev[2] || s[2] != prev[3])) broken = 1;
+        memcpy(prev, s, sizeof prev);
+    }
+    s_shadow_tap_on = 0;
+    CHECK(!broken, "the shadow window slides one sample per output across block edges");
+}
+
 static void test_pitch_zero_still_steps_the_envelope(void) {
     spu_init();
     stage_ram();
@@ -195,6 +246,8 @@ int main(void) {
     test_pitch_zero_holds_the_voice();
     test_nonzero_pitch_still_advances();
     test_half_pitch_advances_half_as_fast();
+    test_fast_pitch_carries_steps_across_blocks();
+    test_shadow_window_slides_across_blocks();
     test_pitch_zero_still_steps_the_envelope();
     printf(failures ? "FAILED (%d)\n" : "ALL PASS\n", failures);
     return failures ? 1 : 0;
