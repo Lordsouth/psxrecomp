@@ -1959,6 +1959,11 @@ static int spu_r_voice(PstR *r, int idx) {
         !pst_r_u8(r, &v->flags) || !pst_r_u16(r, &v->env_level) ||
         !pst_r_u32(r, &v->adsr_divider) || !pst_r_u8(r, &v->adsr_phase))
         return 0;
+    /* Live states stay in [0, 28+3] with phase < 0x1000; older builds could
+     * leave up to 4 whole steps in phase. Anything else would index past
+     * samples[] / previous_samples[] in the Gaussian and the shadow tap. */
+    if (sample_idx < 0 || sample_idx > SPU_BLOCK_SAMPLES + 3 || v->phase >= 0x5000u)
+        return 0;
     v->sample_idx = (int)sample_idx;
     for (int ch = 0; ch < 2; ch++)
         if (!pst_r_i16(r, &sweep_voice_env[idx][ch].level) ||
