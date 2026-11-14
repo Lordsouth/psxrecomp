@@ -96,6 +96,9 @@ void gl_renderer_pass_begin_diag(GLRenderPassBeginDiag *out);
 void     gl_renderer_pass_set_flip_shown(int shown);
 /* Capture the drawn rect at alpha_q16 (keep) and roll the rect back. */
 void     gl_renderer_pass_end(uint32_t alpha_q16, int keep);
+/* A GP0(A0h) upload opened inside a pass: journal its destination now, before
+ * gpu.c streams the payload into its VRAM array (the commit comes too late). */
+void     gl_renderer_pass_note_upload_open(int x, int y, int w, int h);
 uint32_t gl_renderer_pass_leaks(void);
 int      gl_renderer_pass_verify_vram(void);
 void     gl_renderer_pass_note_cost(uint64_t ticks);
@@ -106,6 +109,9 @@ void     gl_renderer_pass_service_presents(void);
  * presents past the frame's planned end (the next flip was late; the newest
  * image held), stale pass-cost estimates measured again. */
 void     gl_renderer_pass_diag(uint64_t out[10]);
+/* Host time from the flip that shows a pass generation's frame to its first
+ * present: sum and max in ms, and the number of generations counted. */
+void     gl_renderer_pass_frame_delay(double* sum_ms, double* max_ms, uint64_t* n);
 /* Always-on snapshot of the last eligible planner call and lifetime count of
  * wanted plans refused with zero measured credit. Times are host milliseconds;
  * reads do not reset counters or invoke the planner. Backend refusals leave

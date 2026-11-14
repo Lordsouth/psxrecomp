@@ -236,6 +236,11 @@ GrBackend gr_backend(void) { return GR_BACKEND_SOFTWARE; }
 int gl_renderer_texture_banks_supported(void) { return 0; }
 int gl_renderer_select_texture_bank(uint16_t id) { return id == 0; }
 int gl_renderer_select_texture_bank_live_clut(uint16_t id) { return id == 0; }
+int gr_texture_banks_supported(void) { return 0; }
+int gr_select_texture_bank(uint16_t id, int live_clut) { (void)live_clut; return id == 0; }
+/* mod_texture_packet_bank always yields bank 0, so live-CLUT lookup is unreachable. */
+int mod_texture_bank_live_clut(uint16_t id) { (void)id; abort(); }
+void psx_cheats_on_vblank(void) {}
 uint16_t mod_texture_packet_bank(uint32_t p, const uint32_t *words, uint32_t n)
 { (void)p; (void)words; (void)n; return 0; }
 int mod_texture_packet_precision(uint32_t p, float q[3], float xy[6])
@@ -288,6 +293,8 @@ int gte_nclip_native_wide_sign(int32_t mac0, int *sign)
 { (void)mac0; (void)sign; abort(); }
 int gte_nclip_native_wide_previous_sign(int32_t mac0, int *sign)
 { (void)mac0; (void)sign; abort(); }
+int gte_nclip_zero_positive(int32_t mac0, uint32_t pc)
+{ (void)mac0; (void)pc; abort(); }
 int pgxp_projection_tracking(void) { return 0; }
 void pgxp_set_projection_tracking(int enabled)
 { if (enabled) abort(); }
@@ -378,6 +385,8 @@ void gr_vram_upload_begin(int x,int y,int w,int h) {
     ++test_upload_begins; test_upload_rect[0]=x; test_upload_rect[1]=y;
     test_upload_rect[2]=w; test_upload_rect[3]=h;
 }
+/* No render pass runs in this guard (g_psx_render_pass_active stays 0). */
+void gl_renderer_pass_note_upload_open(int x,int y,int w,int h) { (void)x; (void)y; (void)w; (void)h; }
 uint16_t gr_vram_read(int x, int y) { return g_vram[(y & 511) * 1024 + (x & 1023)]; }
 void gr_vram_transfer_in(int x, int y, int w, int h, const uint16_t *pixels)
 {

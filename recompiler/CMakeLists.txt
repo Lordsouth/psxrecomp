@@ -1523,6 +1523,10 @@ if(BUILD_TESTING AND Python3_Interpreter_FOUND AND NOT MSVC)
         COMMAND ${Python3_EXECUTABLE}
             "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/tests/test_gpu_upload_history.py"
             --cc ${CMAKE_C_COMPILER})
+    add_test(NAME gpu_pass_vram_journal
+        COMMAND ${Python3_EXECUTABLE}
+            "${CMAKE_CURRENT_SOURCE_DIR}/../runtime/tests/test_gpu_pass_vram_journal.py"
+            --cc ${CMAKE_C_COMPILER})
 endif()
 
 # UTF-8 process code page on Windows for every shipped tool (issue #371): they

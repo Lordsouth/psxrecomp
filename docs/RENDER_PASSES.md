@@ -99,6 +99,12 @@ point (default `PENDING`, reset at every session start):
   N and its in-betweens are shown from the next flip, one game frame later
   than stock (the latency of any interpolator with one frame of history).
 
+`render_pass_stats` measures the difference: `frame_delay_sum_ms` /
+`frame_delay_n` is the mean host time from the flip that shows a generation's
+frame to that generation's first present. Digimon World (20 FPS) measured
+50-54 ms SHOWN (`GsDrawOt` entry after the swap) and 3-10 ms PENDING (`VSync`
+entry) on the same scenes.
+
 Decide by decoding the game's DISPENV / DRAWENV tables and where it calls
 `PutDispEnv` and `DrawOTag`, not by assumption: in V8:2 `DISPENV[i]` shows
 the buffer `DRAWENV[1-i]` draws.

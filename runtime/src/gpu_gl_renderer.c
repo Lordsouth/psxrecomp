@@ -8195,6 +8195,8 @@ typedef struct PassGen {
     uint32_t period;              /* guest VBlanks the frame stays on screen */
     int      shown;               /* built for a frame already on screen */
     double   t_start, t_len;      /* host ticks, set on promotion */
+    double   flip_t;              /* host ticks of the flip that shows its frame */
+    int      first_shown;         /* its first present has been counted */
 } PassGen;
 static int      s_pass_flip_shown = 0;
 static PassGen  s_pgen[PASS_GENERATIONS];
@@ -8235,6 +8237,13 @@ static int      s_pgen_promote = -1;
 static uint64_t s_pgen_promotions = 0, s_pgen_presents = 0, s_pgen_blends = 0;
 static uint64_t s_pgen_expired = 0, s_pgen_unmatched = 0, s_pgen_early = 0;
 static uint64_t s_pgen_late = 0;     /* presents past the frame's planned end */
+/* Frame delay: host time from the flip that shows a generation's frame (the
+ * stock present of that frame) to the generation's first present. A SHOWN
+ * generation opens after its flip and shows from the next one, about a frame
+ * later; a PENDING one shows from its own flip. */
+static double   s_last_flip_t = 0.0, s_gen_delay_sum = 0.0, s_gen_delay_max = 0.0;
+static int      s_last_flip_x = -1, s_last_flip_y = -1;
+static uint64_t s_gen_delay_n = 0;
 
 static GLuint   s_pb_hr_tex = 0, s_pb_hr_rb = 0, s_pb_hr_fbo = 0;
 static int      s_pb_hr_w = 0, s_pb_hr_h = 0;
@@ -8481,6 +8490,18 @@ void gl_renderer_pass_note_cost(uint64_t ticks) {
 
 uint32_t gl_renderer_pass_leaks(void) {
     GL_RT_SYNC("pass_leaks"); return s_pass_leaks; }
+/* gpu.c writes a GP0(A0h) payload into its VRAM array word by word and only
+ * then commits it (gp0_commit_cpu_to_vram -> glb_vram_transfer_in), so the
+ * journal entry taken at the commit would back up the pass's own pixels and
+ * the rollback would keep them in the CPU VRAM (Digimon World's battle
+ * command menu redraws its text texture at 704,472 inside every pass). Back
+ * the destination up when the transfer opens; the commit then finds it
+ * covered. */
+void gl_renderer_pass_note_upload_open(int x, int y, int w, int h) {
+    GL_RT_SYNC("pass_upload_open");
+    (void)pass_refuse_write("upload", x, y, w, h);
+}
+
 int gl_renderer_pass_verify_vram(void) {
     GL_RT_SYNC("pass_verify_vram"); return s_pv_ok; }
 
@@ -8797,6 +8818,10 @@ static int transaction_begin(int x, int y, int w, int h, int open_gen,
         g->source_path = wide ? GL_PRES_WIDE : GL_PRES_VRAM;
         g->period = period_vblanks ? period_vblanks : 1u;
         g->shown = s_pass_flip_shown;
+        /* SHOWN: the flip that put this rect on screen, which the FLIP source may
+         * not have seen yet (it notices at the next VBlank). PENDING: the flip
+         * that promotes it. 0 = still to come. */
+        g->flip_t = (g->shown && s_last_flip_x == cx && s_last_flip_y == cy) ? s_last_flip_t : 0.0;
         pass_capture_into(s_pgen_tex[gi][0], g);   /* the game's own image */
         g->phase[0] = 0;
         g->n = 1;
@@ -9505,6 +9530,15 @@ static int pass_gen_present(uint64_t deadline) {
         return 0;
     s_pgen_presents++;
     if (lo != hi) s_pgen_blends++;
+    if (!g->first_shown) {
+        g->first_shown = 1;
+        if (g->flip_t > 0.0) {
+            const double d = (double)SDL_GetPerformanceCounter() - g->flip_t;
+            s_gen_delay_sum += d;
+            if (d > s_gen_delay_max) s_gen_delay_max = d;
+            s_gen_delay_n++;
+        }
+    }
     /* A frame's own last deadline falls at p = 1 (the end of its planned
      * VBlanks); one past it by more than 1/64 is in a VBlank it was not
      * planned to cover. */
@@ -9544,6 +9578,14 @@ void gl_renderer_pass_diag(uint64_t out[10]) {
     out[9] = s_pass_cost_rewarms;
 }
 
+void gl_renderer_pass_frame_delay(double* sum_ms, double* max_ms, uint64_t* n) {
+    GL_RT_SYNC("pass_frame_delay");
+    const double ms = 1000.0 / (double)SDL_GetPerformanceFrequency();
+    *sum_ms = s_gen_delay_sum * ms;
+    *max_ms = s_gen_delay_max * ms;
+    *n = s_gen_delay_n;
+}
+
 uint64_t gl_renderer_pass_journaled(void) {
     GL_RT_SYNC("pass_journaled"); return s_pj_total; }
 uint64_t gl_renderer_pass_backups_reused(void) {
@@ -9581,6 +9623,12 @@ void gl_renderer_pass_set_flip_shown(int shown) {
 static void pass_note_new_frame(int origin_x, int origin_y, int source_path,
                                 int pw, int ph) {
     uint64_t order[PASS_GENERATIONS];uint32_t matches=0;
+    s_last_flip_t = (double)SDL_GetPerformanceCounter();
+    s_last_flip_x = origin_x; s_last_flip_y = origin_y;
+    for (int i = 0; i < PASS_GENERATIONS; ++i)
+        if (s_pgen[i].valid && s_pgen[i].shown && s_pgen[i].flip_t == 0.0 &&
+            s_pgen[i].x == origin_x && s_pgen[i].y == origin_y)
+            s_pgen[i].flip_t = s_last_flip_t;
     for(int i=0;i<PASS_GENERATIONS;++i) {
         PassGen* pend=&s_pgen[i];order[i]=pend->order;
         if(!pend->valid || pend->promoted)continue;
@@ -9642,6 +9690,7 @@ static void pass_apply_promotion(void) {
         PassGen *g = &s_pgen[s_pgen_cur];
         double sp = s_interp_schedule.frame_end - s_interp_schedule.frame_start;
         g->promoted = 1;
+        if (!g->shown || g->flip_t == 0.0) g->flip_t = s_last_flip_t;
         g->t_start = s_interp_schedule.frame_start;
         g->t_len = (double)g->period * sp;
         /* Phase 0 is the image the game actually flipped to. The capture at

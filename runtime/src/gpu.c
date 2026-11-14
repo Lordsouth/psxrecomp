@@ -6691,6 +6691,9 @@ static void gp0_exec_cpu_to_vram(void) {
     vram_write_w = (w == 0) ? 0x400 : (uint16_t)w;
     vram_write_h = (h == 0) ? 0x200 : (uint16_t)h;
     gr_vram_upload_begin(vram_write_x, vram_write_y, vram_write_w, vram_write_h);
+    if (g_psx_render_pass_active)   /* journal before the payload lands */
+        gl_renderer_pass_note_upload_open(vram_write_x, vram_write_y,
+                                          vram_write_w, vram_write_h);
 
     /* A full history retains old uploads; later transfers must not append
      * to the last slot and overflow its diagnostic word counter. */
@@ -8744,6 +8747,8 @@ int gpu_mod_vram_write(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
     if (!pixels || w == 0u || h == 0u || x >= 1024u || y >= 512u ||
         w > 1024u - x || h > 512u - y)
         return 0;
+    if (g_psx_render_pass_active)   /* journal before the pixels land, as A0 does */
+        gl_renderer_pass_note_upload_open((int)x, (int)y, (int)w, (int)h);
     for (uint32_t row = 0; row < h; row++)
         memcpy(&vram[(y + row) * 1024u + x], pixels + (size_t)row * w,
                (size_t)w * sizeof(uint16_t));

@@ -9115,6 +9115,9 @@ static void handle_render_pass_stats(int id, const char *json)
                  b->fbo_status, b->gl_error_before, b->gl_error);
     }
     gl_renderer_pass_diag(gd);
+    double fd_sum = 0.0, fd_max = 0.0;
+    uint64_t fd_n = 0;
+    gl_renderer_pass_frame_delay(&fd_sum, &fd_max, &fd_n);
     gl_renderer_pass_plan_diag(&admission);
     snprintf(admission_json, sizeof admission_json,
              "{\"plans\":%llu,\"frame\":%llu,\"zero_credit_refusals\":%llu,"
@@ -9152,6 +9155,7 @@ static void handle_render_pass_stats(int id, const char *json)
              "\"spans\":%llu,\"span_failures\":%llu,"
              "\"local_views\":%llu,\"local_attempts\":%llu,"
              "\"local_status\":%u,"
+             "\"frame_delay_sum_ms\":%.3f,\"frame_delay_max_ms\":%.3f,\"frame_delay_n\":%llu,"
              "\"admission\":%s,\"last_failure\":%s,\"last_abort_detail\":\"%s\","
              "\"span_fail\":{\"reason\":%u,\"pc\":\"0x%08X\",\"start\":\"0x%08X\","
              "\"stop\":\"0x%08X\",\"ra\":\"0x%08X\",\"after\":\"0x%08X\","
@@ -9190,6 +9194,7 @@ static void handle_render_pass_stats(int id, const char *json)
              (unsigned long long)st.local_views,
              (unsigned long long)st.local_attempts,
              psx_mod_render_local_view_status(),
+             fd_sum, fd_max, (unsigned long long)fd_n,
              admission_json, failure_json, abort_detail_json,
              (unsigned)sf.reason, (unsigned)sf.pc, (unsigned)sf.start_pc,
              (unsigned)sf.stop_pc, (unsigned)sf.ra, (unsigned)sf.after,
